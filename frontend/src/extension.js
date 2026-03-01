@@ -230,7 +230,12 @@ function activate(context) {
     })
   );
 
-  vscode.window.showInformationMessage('Multi-Agent Code Review is active.');
+  // Auto-open Code Review sidebar so the user can see it (focus first view in the container)
+  vscode.commands.executeCommand('codeReview.agentStatus.focus').then(() => {}, () => {});
+
+  vscode.window.showInformationMessage(
+    'Code Review 已激活。左侧点击盾牌图标可查看结果；若后端在 3002/3003 等端口，请在设置中修改 codeReview.backendUrl'
+  );
 }
 
 function deactivate() {}
