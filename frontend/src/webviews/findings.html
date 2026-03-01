@@ -2,58 +2,242 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';">
   <title>Code Review — Findings</title>
   <style>
-    body { background: var(--vscode-editor-background); color: var(--vscode-foreground);
-           font-family: var(--vscode-font-family, sans-serif); padding: 20px; }
-    h2 { margin-bottom: 12px; }
-    .verdict-badge { display: inline-block; padding: 4px 12px; border-radius: 4px;
-                     font-weight: bold; margin-bottom: 16px; }
+    *, *::before, *::after { box-sizing: border-box; }
+    body {
+      background: var(--vscode-editor-background);
+      color: var(--vscode-foreground);
+      font-family: var(--vscode-font-family, 'Segoe UI', sans-serif);
+      font-size: 13px;
+      padding: 20px;
+      margin: 0;
+    }
+    h1 { font-size: 1.15rem; margin: 0 0 16px; }
+
+    .review-header { display: flex; align-items: center; gap: 14px; margin-bottom: 20px; flex-wrap: wrap; }
+    .verdict-badge {
+      display: inline-block; padding: 5px 14px; border-radius: 4px;
+      font-weight: bold; font-size: 0.9rem;
+    }
     .approve         { background: #1e4620; color: #89d185; }
     .request-changes { background: #4d3800; color: #cca700; }
     .block           { background: #4d0000; color: #f48771; }
-    .agent-section { margin-bottom: 24px; }
-    .agent-title { font-weight: bold; margin-bottom: 8px; }
-    table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
-    th { background: var(--vscode-editor-lineHighlightBackground); padding: 6px 10px; text-align: left; }
-    td { padding: 6px 10px; border-bottom: 1px solid var(--vscode-panel-border); vertical-align: top; }
-    .severity-critical { color: #e51400; font-weight: bold; }
-    .severity-high     { color: #f48771; }
-    .severity-medium   { color: #cca700; }
-    .severity-low      { color: #89d185; }
-    .none { opacity: 0.5; font-style: italic; padding: 8px 0; }
+    .score-pill {
+      padding: 4px 12px; border-radius: 12px; font-size: 0.82rem;
+      border: 1px solid var(--vscode-panel-border);
+    }
+    .summary-text { font-size: 0.8rem; opacity: 0.75; max-width: 560px; line-height: 1.5; }
+
+    .counts { display: flex; gap: 10px; margin-bottom: 18px; flex-wrap: wrap; }
+    .count-badge {
+      padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-weight: bold;
+    }
+    .cnt-critical { background: rgba(229,20,0,0.15);   color: #e51400; }
+    .cnt-high     { background: rgba(244,135,113,0.15); color: #f48771; }
+    .cnt-medium   { background: rgba(204,167,0,0.15);   color: #cca700; }
+    .cnt-low      { background: rgba(137,209,133,0.15); color: #89d185; }
+
+    table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
+    thead th {
+      background: var(--vscode-editor-lineHighlightBackground);
+      padding: 7px 10px; text-align: left;
+      border-bottom: 2px solid var(--vscode-panel-border);
+      white-space: nowrap;
+    }
+    tbody tr { border-bottom: 1px solid var(--vscode-panel-border); }
+    tbody tr:hover { background: var(--vscode-list-hoverBackground); }
+    td { padding: 7px 10px; vertical-align: top; }
+
+    .sev-critical { color: #e51400; font-weight: bold; }
+    .sev-high     { color: #f48771; }
+    .sev-medium   { color: #cca700; }
+    .sev-low      { color: #89d185; }
+
+    .source-chip {
+      display: inline-block; padding: 1px 7px; border-radius: 3px;
+      font-size: 0.7rem; font-weight: 600; white-space: nowrap;
+    }
+    .src-builder     { background: rgba(99,179,237,0.15); color: #63b3ed; }
+    .src-factchecker { background: rgba(204,167,0,0.15);  color: #cca700; }
+    .src-attacker    { background: rgba(244,135,113,0.15); color: #f48771; }
+    .src-skeptic     { background: rgba(137,209,133,0.15); color: #89d185; }
+
+    .cwe-badge {
+      display: inline-block; font-size: 0.68rem; padding: 1px 5px;
+      border: 1px solid #f48771; border-radius: 3px; color: #f48771;
+      margin-left: 4px; white-space: nowrap; vertical-align: middle;
+    }
+
+    .detail-row td {
+      padding: 3px 10px 7px 28px;
+      font-size: 0.78rem; opacity: 0.8;
+      border-bottom: none;
+    }
+    .detail-label { font-weight: bold; color: var(--vscode-descriptionForeground); }
+    .detail-mono  { font-family: monospace; }
+
+    .challenge-row td { padding: 3px 10px 8px 28px; font-size: 0.78rem; border-bottom: none; }
+    .challenge-box {
+      background: rgba(99,179,237,0.08); border-left: 3px solid #63b3ed;
+      padding: 6px 10px; border-radius: 0 4px 4px 0;
+    }
+    .challenge-assessment {
+      display: inline-block; font-size: 0.7rem; font-weight: bold;
+      padding: 1px 7px; border-radius: 3px; margin-bottom: 4px;
+    }
+    .assessment-acknowledged { background: rgba(204,167,0,0.2);  color: #cca700; }
+    .assessment-disputed     { background: rgba(99,179,237,0.2); color: #63b3ed; }
+    .assessment-requires_fix { background: rgba(244,135,113,0.2);color: #f48771; }
+
+    .empty { opacity: 0.5; font-style: italic; padding: 12px 0; }
   </style>
 </head>
 <body>
-  <h2>Code Review Findings</h2>
-  <div id="root">Loading…</div>
+  <div id="root"><p class="empty">No review data — run a review first (Ctrl+Shift+P → "Code Review: Review Current File").</p></div>
   <script>
     /*INJECT_DATA*/
+
     const root = document.getElementById('root');
-    if (!reviewData?.agentResults) {
-      root.textContent = 'No results — trigger a review from the command palette.';
-    } else {
-      const { verdict, score, agentResults } = reviewData;
-      let html = `<div class="verdict-badge ${verdict ?? 'approve'}">
-        Verdict: ${verdict ?? 'unknown'} &nbsp;|&nbsp; Score: ${score ?? '—'}/100
-      </div>`;
-      for (const [agent, data] of Object.entries(agentResults)) {
-        const findings = data?.findings || [];
-        html += `<div class="agent-section">
-          <div class="agent-title">${agent.toUpperCase()} — ${data?.status ?? 'unknown'}</div>`;
-        if (!findings.length) {
-          html += `<div class="none">No findings.</div>`;
-        } else {
-          html += `<table><thead><tr><th>Line</th><th>Severity</th><th>Issue</th><th>Suggestion</th></tr></thead><tbody>`;
-          html += findings.map(f =>
-            `<tr><td>${f.line||'—'}</td><td class="severity-${f.severity||''}">${f.severity||''}</td>
-             <td>${f.description||f.claim||f.type||''}</td><td>${f.suggestion||''}</td></tr>`
-          ).join('');
-          html += `</tbody></table>`;
+    if (reviewData && reviewData.verdict) {
+      root.innerHTML = '';
+      renderPage(reviewData);
+    }
+
+    function renderPage(d) {
+      const { verdict, score, summary, prioritizedFindings = [] } = d;
+
+      // Header
+      const header = document.createElement('div');
+      header.innerHTML = '<h1>Code Review Findings</h1>';
+      const rev = document.createElement('div');
+      rev.className = 'review-header';
+      rev.innerHTML =
+        `<span class="verdict-badge ${verdict ?? 'approve'}">${(verdict ?? 'unknown').toUpperCase()}</span>` +
+        `<span class="score-pill">Score: <strong>${score ?? '—'}</strong> / 100</span>` +
+        `<span class="summary-text">${escHtml(summary ?? '')}</span>`;
+      header.appendChild(rev);
+      root.appendChild(header);
+
+      // Severity counts
+      const counts = { critical: 0, high: 0, medium: 0, low: 0 };
+      prioritizedFindings.forEach(f => { if (counts[f.severity] !== undefined) counts[f.severity]++; });
+      if (prioritizedFindings.length) {
+        const countsDiv = document.createElement('div');
+        countsDiv.className = 'counts';
+        for (const [sev, n] of Object.entries(counts)) {
+          if (!n) continue;
+          const badge = document.createElement('span');
+          badge.className = `count-badge cnt-${sev}`;
+          badge.textContent = `${n} ${sev}`;
+          countsDiv.appendChild(badge);
         }
-        html += `</div>`;
+        root.appendChild(countsDiv);
       }
-      root.innerHTML = html;
+
+      if (!prioritizedFindings.length) {
+        const p = document.createElement('p');
+        p.className = 'empty';
+        p.textContent = 'No findings detected. All agents passed.';
+        root.appendChild(p);
+        return;
+      }
+
+      const table = document.createElement('table');
+      table.innerHTML = `<thead><tr>
+        <th>#</th><th>Agent</th><th>Line</th><th>Severity</th>
+        <th>Type</th><th>Description</th><th>Suggestion</th>
+      </tr></thead>`;
+      const tbody = document.createElement('tbody');
+
+      prioritizedFindings.forEach((f, i) => {
+        // Main row
+        const tr = document.createElement('tr');
+        const cweHtml = f.cwe
+          ? `<span class="cwe-badge" title="Common Weakness Enumeration">CWE-${escHtml(String(f.cwe))}</span>`
+          : '';
+        tr.innerHTML =
+          `<td style="opacity:0.5">${i + 1}</td>` +
+          `<td><span class="source-chip src-${f.source ?? 'builder'}">${escHtml(f.source ?? '')}</span></td>` +
+          `<td style="white-space:nowrap">${f.line ?? '—'}</td>` +
+          `<td class="sev-${f.severity ?? 'low'}" style="white-space:nowrap">${f.severity ?? ''}</td>` +
+          `<td style="white-space:nowrap">${escHtml(f.type ?? '')}</td>` +
+          `<td>${escHtml(f.description ?? '')}${cweHtml}</td>` +
+          `<td style="opacity:0.8">${escHtml(f.suggestion ?? '')}</td>`;
+        tbody.appendChild(tr);
+
+        // Factchecker: claim / reality (+ docSource for external doc findings)
+        if (f.claim || f.reality) {
+          const dr = document.createElement('tr');
+          dr.className = 'detail-row';
+          const parts = [];
+          if (f.docSource) parts.push(`<span class="detail-label">Doc:</span> <span style="font-style:italic;opacity:0.8">${escHtml(f.docSource)}</span>`);
+          if (f.claim)     parts.push(`<span class="detail-label">Claim:</span> <span class="detail-mono">${escHtml(f.claim)}</span>`);
+          if (f.reality)   parts.push(`<span class="detail-label">Reality:</span> <span class="detail-mono">${escHtml(f.reality)}</span>`);
+          dr.innerHTML = `<td colspan="7">${parts.join(' &nbsp;|&nbsp; ')}</td>`;
+          tbody.appendChild(dr);
+        }
+
+        // Skeptic: confidence / category
+        if (f.confidence != null) {
+          const dr = document.createElement('tr');
+          dr.className = 'detail-row';
+          let txt = `<span class="detail-label">Confidence:</span> ${f.confidence}/100`;
+          if (f.category) txt += ` &nbsp;|&nbsp; <span class="detail-label">Category:</span> ${escHtml(f.category)}`;
+          dr.innerHTML = `<td colspan="7">${txt}</td>`;
+          tbody.appendChild(dr);
+        }
+
+        // Attacker: attackVector / impact
+        if (f.attackVector || f.impact) {
+          const dr = document.createElement('tr');
+          dr.className = 'detail-row';
+          const parts = [];
+          if (f.attackVector) parts.push(`<span class="detail-label">Vector:</span> ${escHtml(f.attackVector)}`);
+          if (f.impact)       parts.push(`<span class="detail-label">Impact:</span> ${escHtml(f.impact)}`);
+          dr.innerHTML = `<td colspan="7">${parts.join(' &nbsp;|&nbsp; ')}</td>`;
+          tbody.appendChild(dr);
+        }
+        if (f.exploitProof) {
+          const dr = document.createElement('tr');
+          dr.className = 'detail-row';
+          const confirmed = f.exploitProof.confirmed;
+          const pocOut = f.exploitProof.output ? ` — <span class="detail-mono" style="font-size:0.75rem">${escHtml(String(f.exploitProof.output).slice(0,140))}</span>` : '';
+          dr.innerHTML = `<td colspan="7">
+            <span class="detail-label">PoC:</span>
+            <span style="color:${confirmed ? '#f48771' : '#89d185'};font-weight:bold">
+              ${confirmed ? '⚡ Confirmed exploit' : '✓ Not confirmed'}
+            </span>${pocOut}</td>`;
+          tbody.appendChild(dr);
+        }
+
+        // Challenge response (builder defence)
+        if (f.challengeResponse) {
+          const cr = f.challengeResponse;
+          const asmt = String(cr.assessment ?? 'unknown').replace(/[^a-z_]/g,'');
+          const dr = document.createElement('tr');
+          dr.className = 'challenge-row';
+          dr.innerHTML = `<td colspan="7"><div class="challenge-box">
+            <span class="challenge-assessment assessment-${asmt}">Builder: ${escHtml(cr.assessment ?? '')}</span><br>
+            ${cr.explanation ? `<span>${escHtml(cr.explanation)}</span>` : ''}
+            ${cr.proposedFix ? `<div style="margin-top:4px"><span class="detail-label">Proposed fix:</span> <code style="font-size:0.78rem">${escHtml(String(cr.proposedFix).slice(0,240))}</code></div>` : ''}
+          </div></td>`;
+          tbody.appendChild(dr);
+        }
+      });
+
+      table.appendChild(tbody);
+      root.appendChild(table);
+    }
+
+    function escHtml(str) {
+      return String(str)
+        .replace(/&/g,'&amp;')
+        .replace(/</g,'&lt;')
+        .replace(/>/g,'&gt;')
+        .replace(/"/g,'&quot;');
     }
   </script>
 </body>

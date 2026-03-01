@@ -12,13 +12,32 @@ class VerdictProvider {
 
   getChildren() {
     if (!this._result) return [new vscode.TreeItem('No verdict yet.')];
-    const { verdict, score, summary } = this._result;
+    const { verdict, score, summary, prioritizedFindings = [], challengeResponses = [] } = this._result;
     const icon = { approve: '✅', 'request-changes': '⚠️', block: '🚫' }[verdict] ?? '❓';
-    return [
-      new vscode.TreeItem(`${icon} Verdict: ${verdict ?? 'unknown'}`),
+
+    const counts = { critical: 0, high: 0, medium: 0, low: 0 };
+    prioritizedFindings.forEach(f => { if (counts[f.severity] !== undefined) counts[f.severity]++; });
+    const countStr = Object.entries(counts)
+      .filter(([, n]) => n > 0).map(([s, n]) => `${n} ${s}`).join(', ') || 'none';
+
+    const items = [
+      new vscode.TreeItem(`${icon} ${(verdict ?? 'unknown').toUpperCase()}`),
       new vscode.TreeItem(`Score: ${score ?? '—'} / 100`),
-      new vscode.TreeItem(`Summary: ${summary ?? ''}`),
+      new vscode.TreeItem(`Findings: ${countStr}`),
     ];
+
+    if (challengeResponses.length) {
+      const ack = challengeResponses.filter(c => c.response?.challengeResponse?.assessment !== 'disputed').length;
+      items.push(new vscode.TreeItem(`Builder: ${ack}/${challengeResponses.length} critical acknowledged`));
+    }
+
+    if (summary) {
+      const s = new vscode.TreeItem(summary.slice(0, 80) + (summary.length > 80 ? '…' : ''));
+      s.tooltip = summary;
+      items.push(s);
+    }
+
+    return items;
   }
 }
 

@@ -10,10 +10,11 @@
   "main": "./src/extension.js",
   "contributes": {
     "commands": [
-      { "command": "codeReview.reviewFile",      "title": "Review Current File",  "category": "Code Review" },
-      { "command": "codeReview.reviewSelection", "title": "Review Selection",      "category": "Code Review" },
-      { "command": "codeReview.showFindings",    "title": "Show Findings",         "category": "Code Review" },
-      { "command": "codeReview.showCharts",      "title": "Show Skeptic Charts",   "category": "Code Review" }
+      { "command": "codeReview.reviewFile",      "title": "Review Current File",        "category": "Code Review" },
+      { "command": "codeReview.reviewSelection", "title": "Review Selection",            "category": "Code Review" },
+      { "command": "codeReview.reviewWithDocs",  "title": "Review File with Docs",       "category": "Code Review" },
+      { "command": "codeReview.showFindings",    "title": "Show Findings",               "category": "Code Review" },
+      { "command": "codeReview.showCharts",      "title": "Show Skeptic Charts",         "category": "Code Review" }
     ],
     "viewsContainers": {
       "activitybar": [{ "id": "codeReview", "title": "Code Review", "icon": "$(shield)" }]
@@ -43,7 +44,8 @@
     "menus": {
       "editor/context": [
         { "command": "codeReview.reviewFile",      "group": "codeReview" },
-        { "command": "codeReview.reviewSelection", "group": "codeReview", "when": "editorHasSelection" }
+        { "command": "codeReview.reviewSelection", "group": "codeReview", "when": "editorHasSelection" },
+        { "command": "codeReview.reviewWithDocs",  "group": "codeReview" }
       ]
     }
   },
