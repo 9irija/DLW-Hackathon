@@ -1,13 +1,12 @@
 /**
- * orchestrator — coordinates all agents in parallel, aggregates results,
- * and issues a final verdict.
+ * orchestrator — runs factchecker only for now; aggregates result into verdict.
  *
  * Output shape:
  * {
  *   agent: "orchestrator",
  *   verdict: "approve" | "request-changes" | "block",
  *   score: number,        // 0–100 overall code health
- *   agentResults: { factchecker, attacker, skeptic, builder },
+ *   agentResults: { factchecker },
  *   prioritizedFindings: [{ source, ...finding }],
  *   summary: string,
  *   sessionId: string
@@ -15,35 +14,27 @@
  */
 
 const factchecker = require('./factchecker');
-const attacker    = require('./attacker');
-const skeptic     = require('./skeptic');
-const builder     = require('./builder');
 
 /**
  * @param {object} payload  — built by core/parser.js buildReviewPayload()
  * @returns {Promise<object>}
  */
 async function run(payload) {
-  // TODO: aggregate results, score, and prioritize findings
-  const [factResult, attackResult, skepticResult, builderResult] = await Promise.all([
-    factchecker.run(payload),
-    attacker.run(payload),
-    skeptic.run(payload),
-    builder.run(payload),
-  ]);
+  const factResult = await factchecker.run(payload);
+
+  const findings = (factResult.findings || []).map((f) => ({ source: 'factchecker', ...f }));
+  const hasFail = factResult.status === 'fail';
+  const hasWarn = factResult.status === 'warn';
+  const verdict = hasFail ? 'block' : hasWarn ? 'request-changes' : 'approve';
+  const score = hasFail ? 40 : hasWarn ? 70 : 100;
 
   return {
     agent: 'orchestrator',
-    verdict: 'approve',
-    score: 100,
-    agentResults: {
-      factchecker: factResult,
-      attacker:    attackResult,
-      skeptic:     skepticResult,
-      builder:     builderResult,
-    },
-    prioritizedFindings: [],
-    summary: 'Orchestrator not yet implemented — agent stubs returned.',
+    verdict,
+    score,
+    agentResults: { factchecker: factResult },
+    prioritizedFindings: findings,
+    summary: factResult.summary || (verdict === 'approve' ? 'Comments match implementation.' : 'Review findings from factchecker.'),
     sessionId: payload.sessionId || null,
   };
 }
