@@ -3,6 +3,7 @@
  * Runs code/tests in an isolated environment and reports real failures with evidence
  * for: failure timeline, endpoint heatmap, latency distribution, user journey failures,
  * and a system flow diagram.
+ * No LLM/Codex: uses only shadow/runner, testRunner, flowParser; no model env config.
  *
  * Output shape:
  * {

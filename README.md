@@ -71,12 +71,12 @@ The key feature of this extension is **three human checkpoints** built into the 
         ▼
 [Orchestrator — orchestrator.js]  (sole agent manager)
         │
-        ├─ startReview() ── Builder (gpt-4o, always first)
+        ├─ startReview() ── Builder (gpt-5-codex, always first)
         │    Analyses intent, entry points, dependencies, data flows,
         │    external calls, side effects, and preliminary risks.
         │    → Produces codeContext used to enrich all downstream prompts.
         │
-        ├─ runAgent('factchecker') ── Factchecker (gpt-4o-mini) — TWO PASSES
+        ├─ runAgent('factchecker') ── Factchecker (gpt-5-codex) — TWO PASSES
         │    │    Pass 1 — Inline: compares every comment/docstring in the
         │    │             code against what the code actually does.
         │    │             Findings tagged with line number.
@@ -85,10 +85,10 @@ The key feature of this extension is **three human checkpoints** built into the 
         │    │             against the actual implementation.
         │    │             Findings tagged with docSource (filename).
         │    │
-        ├─ runAgent('attacker') ── Attacker (gpt-4o + gpt-4o-mini + shadow/runner)
-        │    │    Step 1 — Static scan (gpt-4o): finds vulnerabilities,
+        ├─ runAgent('attacker') ── Attacker (gpt-5-codex + gpt-5.1-codex-mini + shadow/runner)
+        │    │    Step 1 — Static scan (gpt-5-codex): finds vulnerabilities,
         │    │             maps to CWE IDs, rates severity, describes impact.
-        │    │    Step 2 — PoC generation (gpt-4o-mini, high/critical only):
+        │    │    Step 2 — PoC generation (gpt-5.1-codex-mini, high/critical only):
         │    │             writes a self-contained Node.js exploit script that
         │    │             mocks the vulnerable logic and crafts a malicious input.
         │    │    Step 3 — Shadow execution (child_process, 5 s timeout):
@@ -152,13 +152,14 @@ The key feature of this extension is **three human checkpoints** built into the 
 RunChecks/
 ├── backend/
 │   ├── agents/
-│   │   ├── builder.js       # gpt-4o — code context provider + challenge responder
-│   │   ├── factchecker.js   # gpt-4o-mini — inline comment check + external doc review
-│   │   ├── attacker.js      # gpt-4o + gpt-4o-mini + shadow — 3-step exploit pipeline
+│   │   ├── builder.js       # gpt-5-codex — code context provider + challenge responder
+│   │   ├── factchecker.js   # gpt-5-codex — inline comment check + external doc review
+│   │   ├── attacker.js      # gpt-5-codex + gpt-5.1-codex-mini + shadow — 3-step exploit pipeline
 │   │   ├── skeptic.js       # shadow/runner + flowParser — shadow execution + evidence
 │   │   └── orchestrator.js  # 5-phase pipeline controller → verdict + score
 │   ├── core/
 │   │   ├── openai.js        # Shared OpenAI client (reads OPENAI_API_KEY)
+│   │   ├── llm.js           # complete() — Chat Completions or Responses API (Codex)
 │   │   ├── parser.js        # chunkCode, detectLanguage, buildReviewPayload
 │   │   └── logger.js        # SQLite audit_log (logEntry, updateDecision, getEntries)
 │   ├── context/
@@ -190,13 +191,15 @@ RunChecks/
 
 ## Agent Summary
 
-| Agent | Model | Role | Key output fields |
-|---|---|---|---|
-| **builder** | gpt-4o | Code context provider + challenge responder | `codeContext`, `respondToChallenge()` |
-| **factchecker** | gpt-4o-mini | Inline comment accuracy + external doc accuracy | `claim`, `reality`, `docSource` |
-| **attacker** | gpt-4o + gpt-4o-mini | Security vulnerability scan + PoC execution | `cwe`, `attackVector`, `impact`, `exploitProof.confirmed` |
-| **skeptic** | shadow/runner | Shadow execution + test suite runner + flow graph | `evidence` (4 chart datasets), `flow`, `confidence` |
+| Agent | Default model | Role | Key output fields |
+|-------|----------------|------|-------------------|
+| **builder** | gpt-5-codex | Code context provider + challenge responder | `codeContext`, `respondToChallenge()` |
+| **factchecker** | gpt-5-codex | Inline comment accuracy + external doc accuracy | `claim`, `reality`, `docSource` |
+| **attacker** | gpt-5-codex (static), gpt-5.1-codex-mini (PoC) | Security vulnerability scan + PoC execution | `cwe`, `attackVector`, `impact`, `exploitProof.confirmed` |
+| **skeptic** | — (no LLM) | Shadow execution + test suite runner + flow graph | `evidence` (4 chart datasets), `flow`, `confidence` |
 | **orchestrator** | — | 5-phase pipeline controller | `verdict`, `score`, `prioritizedFindings`, `challengeResponses` |
+
+**Default models** are Codex (Responses API). Override via `.env`: `BUILDER_MODEL`, `FACTCHECKER_MODEL`, `ATTACKER_MODEL`, `ATTACKER_POC_MODEL` (e.g. `gpt-4o` / `gpt-4o-mini` for Chat Completions if you don't have Codex access).
 
 ---
 
@@ -206,21 +209,26 @@ RunChecks/
 
 ```bash
 cd backend
-cp .env.example .env     # add your OPENAI_API_KEY
+cp .env.example .env
+# Edit .env and set OPENAI_API_KEY=sk-... (required)
 npm install
-node index.js            # → http://localhost:3001
+npm start
+# Or: node index.js
 ```
+
+- Server listens on `http://localhost:3001` (or the next free port 3002, 3003, … if 3001 is in use).
+- Open `http://localhost:3001` in a browser for a short API overview; `http://localhost:3001/health` returns `{"status":"ok"}`.
+- **Default models** (no extra env needed): **Codex** — Builder and Attacker static use **gpt-5-codex**; Factchecker uses **gpt-5-codex**; Attacker PoC uses **gpt-5.1-codex-mini**. All use the Responses API. If your account has no Codex access, set `BUILDER_MODEL=gpt-4o`, `FACTCHECKER_MODEL=gpt-4o-mini`, `ATTACKER_MODEL=gpt-4o`, `ATTACKER_POC_MODEL=gpt-4o-mini` in `.env` to use Chat Completions instead.
 
 ### 2. Frontend (VS Code Extension)
 
 ```bash
 cd frontend
-code .                   # open folder in VS Code
-# Press F5 — launches Extension Development Host
+# Open the frontend folder in VS Code (File → Open Folder → frontend)
+# Press F5 to launch the Extension Development Host
 ```
 
-The extension connects to `http://localhost:3001` by default.
-Change via **Settings → codeReview.backendUrl**.
+In the new window, use the Code Review sidebar (shield icon) or commands (Ctrl+Shift+P → "Code Review: …"). The extension talks to `http://localhost:3001` by default; if the backend runs on another port, set **Settings → codeReview.backendUrl**.
 
 ---
 

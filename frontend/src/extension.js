@@ -294,7 +294,12 @@ function activate(context) {
     })
   );
 
-  vscode.window.showInformationMessage('Multi-Agent Code Review is active.');
+  // Auto-open Code Review sidebar so the user can see it (focus first view in the container)
+  vscode.commands.executeCommand('codeReview.agentStatus.focus').then(() => {}, () => {});
+
+  vscode.window.showInformationMessage(
+    'Code Review is active. Click the shield icon on the left to see results; if the backend runs on 3002/3003, set codeReview.backendUrl in Settings.'
+  );
 }
 
 function deactivate() {}

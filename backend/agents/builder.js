@@ -16,9 +16,11 @@
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
-const openai = require('../core/openai');
+require('dotenv').config();
+const { complete } = require('../core/llm');
 
-const BUILDER_MODEL = 'gpt-4o';
+// Default Codex (Responses API). Override with BUILDER_MODEL in .env to use Chat Completions (e.g. gpt-4o).
+const BUILDER_MODEL = process.env.CODEX_MODEL || process.env.BUILDER_MODEL || 'gpt-5-codex';
 
 const BUILDER_SYSTEM_PROMPT = `You are the Builder Agent in a multi-agent AI code review system embedded in VS Code.
 
@@ -99,17 +101,14 @@ Populate the lineRange with the file and line numbers provided above.
 Populate submissionId with: ${submissionId}
 `;
 
-  const response = await openai.chat.completions.create({
+  const raw = await complete({
     model: BUILDER_MODEL,
+    system: BUILDER_SYSTEM_PROMPT,
+    user: userMessage,
     temperature: 0.1,
-    response_format: { type: 'json_object' },
-    messages: [
-      { role: 'system', content: BUILDER_SYSTEM_PROMPT },
-      { role: 'user', content: userMessage },
-    ],
+    max_tokens: 2048,
+    jsonMode: true,
   });
-
-  const raw = response.choices[0].message.content;
   let codeContext;
   try {
     codeContext = JSON.parse(raw);
@@ -145,17 +144,14 @@ This finding may trace back to your original analysis.
 Respond with the challengeResponse JSON object as specified in your instructions.
 `;
 
-  const response = await openai.chat.completions.create({
+  const raw = await complete({
     model: BUILDER_MODEL,
+    system: BUILDER_SYSTEM_PROMPT,
+    user: challengeMessage,
     temperature: 0.1,
-    response_format: { type: 'json_object' },
-    messages: [
-      { role: 'system', content: BUILDER_SYSTEM_PROMPT },
-      { role: 'user', content: challengeMessage },
-    ],
+    max_tokens: 2048,
+    jsonMode: true,
   });
-
-  const raw = response.choices[0].message.content;
   let challengeResponse;
   try {
     challengeResponse = JSON.parse(raw);

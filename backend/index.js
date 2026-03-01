@@ -132,9 +132,37 @@ app.post('/decision', async (req, res) => {
   }
 });
 
+// GET /  —  friendly response when opening backend URL in browser
+app.get('/', (_req, res) => {
+  res.type('html').send(`
+    <h1>Code Review Backend</h1>
+    <p>Server is running. This is an API server for the VS Code extension.</p>
+    <ul>
+      <li><a href="/health">GET /health</a> — liveness check</li>
+      <li>POST /review — run code review (called by extension)</li>
+      <li>POST /decision — record human decision</li>
+    </ul>
+  `);
+});
+
 // GET /health  ----------------------------------------------------------------
 app.get('/health', (_req, res) => res.json({ status: 'ok', timestamp: new Date().toISOString() }));
 
-app.listen(PORT, () => console.log(`Code review backend listening on http://localhost:${PORT}`));
+// Try PORT, then PORT+1, ... up to PORT+9 if port is in use
+function tryListen(port, maxTries = 10) {
+  const server = app.listen(port, () => {
+    console.log(`Code review backend listening on http://localhost:${port}`);
+  });
+  server.on('error', (err) => {
+    if (err.code === 'EADDRINUSE' && maxTries > 1) {
+      tryListen(port + 1, maxTries - 1);
+    } else {
+      console.error('Cannot start server:', err.message);
+      process.exit(1);
+    }
+  });
+}
+
+tryListen(Number(PORT));
 
 module.exports = app;
