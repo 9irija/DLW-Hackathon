@@ -234,7 +234,7 @@ function activate(context) {
   vscode.commands.executeCommand('codeReview.agentStatus.focus').then(() => {}, () => {});
 
   vscode.window.showInformationMessage(
-    'Code Review 已激活。左侧点击盾牌图标可查看结果；若后端在 3002/3003 等端口，请在设置中修改 codeReview.backendUrl'
+    'Code Review is active. Click the shield icon on the left to see results; if the backend runs on 3002/3003, set codeReview.backendUrl in Settings.'
   );
 }
 

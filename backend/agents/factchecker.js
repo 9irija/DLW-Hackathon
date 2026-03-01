@@ -32,9 +32,9 @@
  */
 
 require('dotenv').config();
-const openai = require('../core/openai');
+const { complete } = require('../core/llm');
 
-// Codex integration: FACTCHECKER_MODEL or CODEX_MODEL; else default Codex (helpful for code-vs-comment understanding)
+// Default Codex (Responses API). Override with FACTCHECKER_MODEL in .env to use Chat Completions (e.g. gpt-4o-mini).
 const FACTCHECKER_MODEL = process.env.FACTCHECKER_MODEL || process.env.CODEX_MODEL || 'gpt-5-codex';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -103,17 +103,13 @@ The summary should be one sentence describing how well the document matches the 
 async function checkInlineComments(code, filePath, language) {
   const userContent = `File: ${filePath}\nLanguage: ${language}\n\nCode:\n\`\`\`\n${code}\n\`\`\`\n\nList every place where a comment or docstring does not match the implementation. Output JSON only.`;
 
-  const completion = await openai.chat.completions.create({
+  const raw     = (await complete({
     model: FACTCHECKER_MODEL,
+    system: INLINE_SYSTEM,
+    user: userContent,
     temperature: 0.2,
     max_tokens: 2048,
-    messages: [
-      { role: 'system', content: INLINE_SYSTEM },
-      { role: 'user',   content: userContent   },
-    ],
-  });
-
-  const raw     = completion.choices?.[0]?.message?.content?.trim() ?? '';
+  })) || '';
   const cleaned = raw.replace(/^```json\s*/i, '').replace(/\s*```\s*$/i, '').trim();
   const parsed  = JSON.parse(cleaned);
 
@@ -148,17 +144,13 @@ async function checkInlineComments(code, filePath, language) {
 async function checkDocAgainstCode(code, filePath, doc) {
   const userContent = `Document name: ${doc.name}\n\nDocument content:\n${doc.content.slice(0, 6000)}\n\n---\n\nActual source code (file: ${filePath}):\n\`\`\`\n${code.slice(0, 4000)}\n\`\`\`\n\nList every discrepancy between the document and the code. Output JSON only.`;
 
-  const completion = await openai.chat.completions.create({
+  const raw     = (await complete({
     model: FACTCHECKER_MODEL,
+    system: DOC_SYSTEM,
+    user: userContent,
     temperature: 0.2,
     max_tokens: 2048,
-    messages: [
-      { role: 'system', content: DOC_SYSTEM  },
-      { role: 'user',   content: userContent },
-    ],
-  });
-
-  const raw     = completion.choices?.[0]?.message?.content?.trim() ?? '';
+  })) || '';
   const cleaned = raw.replace(/^```json\s*/i, '').replace(/\s*```\s*$/i, '').trim();
   const parsed  = JSON.parse(cleaned);
 

@@ -29,10 +29,10 @@
  */
 
 require('dotenv').config();
-const openai         = require('../core/openai');
+const { complete }   = require('../core/llm');
 const { runSnippet } = require('../shadow/runner');
 
-// Codex integration: ATTACKER_MODEL / ATTACKER_POC_MODEL or CODEX_MODEL; else default Codex (helpful for security + PoC code)
+// Default Codex (Responses API). Override with ATTACKER_MODEL / ATTACKER_POC_MODEL in .env for Chat Completions.
 const ATTACKER_MODEL     = process.env.ATTACKER_MODEL     || process.env.CODEX_MODEL || 'gpt-5-codex';
 const ATTACKER_POC_MODEL = process.env.ATTACKER_POC_MODEL || process.env.CODEX_MODEL || 'gpt-5.1-codex-mini';
 
@@ -94,17 +94,14 @@ async function staticAnalysis(code, filePath, language, builderContext) {
     'Find all security vulnerabilities. Output JSON only.',
   ].join('');
 
-  const completion = await openai.chat.completions.create({
+  const raw    = (await complete({
     model: ATTACKER_MODEL,
+    system: STATIC_SYSTEM,
+    user: userContent,
     temperature: 0.1,
-    response_format: { type: 'json_object' },
-    messages: [
-      { role: 'system', content: STATIC_SYSTEM },
-      { role: 'user',   content: userContent   },
-    ],
-  });
-
-  const raw    = completion.choices[0]?.message?.content ?? '{}';
+    max_tokens: 2048,
+    jsonMode: true,
+  })) || '{}';
   const parsed = JSON.parse(raw);
   return {
     findings: normaliseFindings(parsed.findings),
@@ -128,16 +125,13 @@ async function generatePoC(finding, code) {
     'Write a self-contained Node.js PoC that demonstrates this vulnerability.',
   ].join('\n');
 
-  const completion = await openai.chat.completions.create({
+  const raw = (await complete({
     model: ATTACKER_POC_MODEL,
+    system: POC_SYSTEM,
+    user: userContent,
     temperature: 0.2,
-    messages: [
-      { role: 'system', content: POC_SYSTEM  },
-      { role: 'user',   content: userContent },
-    ],
-  });
-
-  const raw = (completion.choices[0]?.message?.content ?? '').trim();
+    max_tokens: 2048,
+  })).trim();
   return raw
     .replace(/^```(?:js|javascript)?\s*/i, '')
     .replace(/\s*```\s*$/i, '')
