@@ -31,7 +31,11 @@
  * }
  */
 
+require('dotenv').config();
 const openai = require('../core/openai');
+
+// Codex integration: FACTCHECKER_MODEL or CODEX_MODEL; else default Codex (helpful for code-vs-comment understanding)
+const FACTCHECKER_MODEL = process.env.FACTCHECKER_MODEL || process.env.CODEX_MODEL || 'gpt-5-codex';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -100,7 +104,7 @@ async function checkInlineComments(code, filePath, language) {
   const userContent = `File: ${filePath}\nLanguage: ${language}\n\nCode:\n\`\`\`\n${code}\n\`\`\`\n\nList every place where a comment or docstring does not match the implementation. Output JSON only.`;
 
   const completion = await openai.chat.completions.create({
-    model: 'gpt-4o-mini',
+    model: FACTCHECKER_MODEL,
     temperature: 0.2,
     max_tokens: 2048,
     messages: [
@@ -145,7 +149,7 @@ async function checkDocAgainstCode(code, filePath, doc) {
   const userContent = `Document name: ${doc.name}\n\nDocument content:\n${doc.content.slice(0, 6000)}\n\n---\n\nActual source code (file: ${filePath}):\n\`\`\`\n${code.slice(0, 4000)}\n\`\`\`\n\nList every discrepancy between the document and the code. Output JSON only.`;
 
   const completion = await openai.chat.completions.create({
-    model: 'gpt-4o-mini',
+    model: FACTCHECKER_MODEL,
     temperature: 0.2,
     max_tokens: 2048,
     messages: [

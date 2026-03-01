@@ -28,8 +28,13 @@
  * }
  */
 
+require('dotenv').config();
 const openai         = require('../core/openai');
 const { runSnippet } = require('../shadow/runner');
+
+// Codex integration: ATTACKER_MODEL / ATTACKER_POC_MODEL or CODEX_MODEL; else default Codex (helpful for security + PoC code)
+const ATTACKER_MODEL     = process.env.ATTACKER_MODEL     || process.env.CODEX_MODEL || 'gpt-5-codex';
+const ATTACKER_POC_MODEL = process.env.ATTACKER_POC_MODEL || process.env.CODEX_MODEL || 'gpt-5.1-codex-mini';
 
 // ─── Prompts ─────────────────────────────────────────────────────────────────
 
@@ -90,7 +95,7 @@ async function staticAnalysis(code, filePath, language, builderContext) {
   ].join('');
 
   const completion = await openai.chat.completions.create({
-    model: 'gpt-4o',
+    model: ATTACKER_MODEL,
     temperature: 0.1,
     response_format: { type: 'json_object' },
     messages: [
@@ -124,7 +129,7 @@ async function generatePoC(finding, code) {
   ].join('\n');
 
   const completion = await openai.chat.completions.create({
-    model: 'gpt-4o-mini',
+    model: ATTACKER_POC_MODEL,
     temperature: 0.2,
     messages: [
       { role: 'system', content: POC_SYSTEM  },
