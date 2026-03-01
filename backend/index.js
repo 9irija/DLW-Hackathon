@@ -15,12 +15,13 @@ app.use(express.json({ limit: '2mb' }));
 // POST /review  ---------------------------------------------------------------
 app.post('/review', async (req, res) => {
   try {
-    const { code, filePath, diff } = req.body;
+    const { code, filePath, diff, workspaceRoot } = req.body;
     if (!code || !filePath) return res.status(400).json({ error: 'code and filePath are required' });
 
     const sessionId = crypto.randomUUID();
     const payload   = buildReviewPayload(code, filePath, diff);
     payload.sessionId = sessionId;
+    if (workspaceRoot) payload.workspaceRoot = workspaceRoot;
 
     // Embed each chunk and store in the RAG vector store
     for (let i = 0; i < payload.chunks.length; i++) {
