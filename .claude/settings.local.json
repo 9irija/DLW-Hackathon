@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(node -e \"require\\(''dotenv''\\).config\\(\\); console.log\\(''KEY:'', process.env.OPENAI_API_KEY ? ''SET \\('' + process.env.OPENAI_API_KEY.slice\\(0,7\\) + ''...\\)'' : ''MISSING''\\)\")",
+      "Bash(node -e \"require\\(''./core/openai''\\); console.log\\(''openai: OK''\\)\")",
+      "Bash(timeout 5 node index.js)"
+    ]
+  }
+}

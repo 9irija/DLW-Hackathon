@@ -2,90 +2,393 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Code Review — Skeptic Charts</title>
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'none'; script-src https://cdn.jsdelivr.net 'unsafe-inline'; style-src 'unsafe-inline';">
+  <title>Code Review — Analysis</title>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
   <style>
-    body { background: var(--vscode-editor-background); color: var(--vscode-foreground);
-           font-family: var(--vscode-font-family, sans-serif); padding: 20px; }
-    h2 { margin-bottom: 16px; }
-    .chart-wrap { max-width: 640px; margin-bottom: 40px; }
-    .section-title { font-size: 0.9rem; font-weight: bold; margin-bottom: 8px; opacity: 0.85; }
-    .overall { font-size: 2rem; font-weight: bold; text-align: center; }
-    .overall-label { text-align: center; opacity: 0.6; font-size: 0.85rem; margin-bottom: 24px; }
+    *, *::before, *::after { box-sizing: border-box; }
+    body {
+      background: var(--vscode-editor-background);
+      color: var(--vscode-foreground);
+      font-family: var(--vscode-font-family, 'Segoe UI', sans-serif);
+      font-size: 13px;
+      padding: 20px;
+      margin: 0;
+    }
+    h1 { font-size: 1.2rem; margin: 0 0 4px; }
+    h2 { font-size: 1rem; margin: 28px 0 10px; border-bottom: 1px solid var(--vscode-panel-border); padding-bottom: 6px; }
+    h3 { font-size: 0.85rem; font-weight: bold; margin: 0 0 8px; opacity: 0.85; }
+
+    .review-header { display: flex; align-items: center; gap: 16px; margin-bottom: 24px; flex-wrap: wrap; }
+    .verdict-badge {
+      display: inline-block; padding: 5px 14px; border-radius: 4px;
+      font-weight: bold; font-size: 0.9rem; letter-spacing: 0.03em;
+    }
+    .approve         { background: #1e4620; color: #89d185; }
+    .request-changes { background: #4d3800; color: #cca700; }
+    .block           { background: #4d0000; color: #f48771; }
+    .score-ring {
+      display: flex; flex-direction: column; align-items: center;
+      width: 72px; height: 72px; border-radius: 50%;
+      border: 4px solid var(--vscode-panel-border);
+      justify-content: center; background: var(--vscode-editor-background);
+    }
+    .score-ring .score-num { font-size: 1.4rem; font-weight: bold; line-height: 1; }
+    .score-ring .score-lbl { font-size: 0.6rem; opacity: 0.6; margin-top: 1px; }
+    .summary-text { opacity: 0.8; font-size: 0.82rem; max-width: 520px; line-height: 1.5; }
+
+    .agent-chips { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
+    .chip {
+      padding: 3px 10px; border-radius: 12px; font-size: 0.75rem; font-weight: 600;
+      border: 1px solid currentColor;
+    }
+    .chip-pass   { color: #89d185; border-color: #89d185; }
+    .chip-warn   { color: #cca700; border-color: #cca700; }
+    .chip-fail   { color: #f48771; border-color: #f48771; }
+    .chip-error  { color: #888;    border-color: #888;    }
+
+    .chart-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin-bottom: 12px; }
+    @media (max-width: 640px) { .chart-grid { grid-template-columns: 1fr; } }
+    .chart-card {
+      background: var(--vscode-editor-lineHighlightBackground);
+      border: 1px solid var(--vscode-panel-border);
+      border-radius: 6px; padding: 14px;
+    }
+    .chart-card canvas { max-height: 200px; }
+    .chart-full { margin-bottom: 24px; }
+    .chart-full canvas { max-height: 180px; }
+
+    .journey-list { list-style: none; padding: 0; margin: 0; }
+    .journey-list li {
+      padding: 6px 10px; border-radius: 4px; margin-bottom: 6px;
+      background: rgba(244,135,113,0.08); border-left: 3px solid #f48771;
+      font-size: 0.8rem; word-break: break-word;
+    }
+    .journey-list li .j-name { font-weight: bold; margin-bottom: 2px; }
+    .journey-list li .j-err  { opacity: 0.7; font-family: monospace; }
+
+    .flow-wrap { display: flex; flex-wrap: wrap; gap: 6px; }
+    .flow-node {
+      background: var(--vscode-editor-lineHighlightBackground);
+      border: 1px solid var(--vscode-panel-border);
+      border-radius: 4px; padding: 4px 10px; font-size: 0.78rem;
+      font-family: monospace;
+    }
+    .flow-edge {
+      display: flex; align-items: center; gap: 4px;
+      font-size: 0.78rem; font-family: monospace;
+      padding: 3px 8px;
+      background: rgba(99,179,237,0.08);
+      border-radius: 4px; margin-bottom: 3px;
+    }
+    .flow-arrow { opacity: 0.5; }
+
+    .empty { opacity: 0.5; font-style: italic; padding: 8px 0; font-size: 0.85rem; }
   </style>
 </head>
 <body>
-  <h2>Skeptic Agent — Confidence Analysis</h2>
-  <div id="root"></div>
+  <div id="root"><p class="empty">No review data — run a review first (Ctrl+Shift+P → "Code Review: Review Current File").</p></div>
   <script>
     /*INJECT_DATA*/
-    const root    = document.getElementById('root');
-    const skeptic = reviewData?.agentResults?.skeptic || {};
-    const findings = skeptic.findings || [];
-    const overall  = skeptic.confidence ?? null;
 
-    if (overall !== null) {
-      root.innerHTML += `<div class="overall">${overall}</div>
-        <div class="overall-label">Overall Confidence Score (0–100)</div>`;
+    const root = document.getElementById('root');
+    if (reviewData && reviewData.verdict) {
+      root.innerHTML = '';
+      renderHeader(reviewData);
+      renderAgentStatus(reviewData);
+      renderSeverityRadar(reviewData);
+      renderSkepticEvidence(reviewData);
+      renderFlowDiagram(reviewData);
     }
 
-    if (findings.length) {
-      const colors = findings.map(f =>
-        f.severity === 'high' ? 'rgba(244,135,113,0.75)' :
-        f.severity === 'medium' ? 'rgba(204,167,0,0.75)' : 'rgba(137,209,133,0.75)'
-      );
-      const wrap = document.createElement('div');
-      wrap.className = 'chart-wrap';
-      wrap.innerHTML = '<div class="section-title">Per-Finding Confidence</div><canvas id="bar"></canvas>';
-      root.appendChild(wrap);
-      new Chart(document.getElementById('bar'), {
-        type: 'bar',
-        data: {
-          labels: findings.map((f, i) => f.category ? `${f.category} #${i+1}` : `Finding ${i+1}`),
-          datasets: [{ label: 'Confidence', data: findings.map(f => f.confidence ?? 0),
-            backgroundColor: colors, borderColor: colors.map(c => c.replace('0.75','1')), borderWidth: 1 }],
-        },
-        options: {
-          scales: {
-            y: { beginAtZero: true, max: 100, ticks: { color: '#ccc' }, grid: { color: '#333' } },
-            x: { ticks: { color: '#ccc', maxRotation: 45 }, grid: { color: '#333' } },
-          },
-          plugins: { legend: { labels: { color: '#ccc' } } },
-        },
-      });
+    function renderHeader(d) {
+      const { verdict, score, summary } = d;
+      const scoreColour = score >= 80 ? '#89d185' : score >= 50 ? '#cca700' : '#f48771';
+      const h = document.createElement('div');
+      h.className = 'review-header';
+      h.innerHTML = `
+        <div>
+          <h1>Multi-Agent Code Review</h1>
+          <span class="verdict-badge ${verdict ?? 'approve'}">${(verdict ?? 'unknown').toUpperCase()}</span>
+        </div>
+        <div class="score-ring" style="border-color:${scoreColour}">
+          <span class="score-num" style="color:${scoreColour}">${score ?? '—'}</span>
+          <span class="score-lbl">/ 100</span>
+        </div>
+        <div class="summary-text">${summary ?? ''}</div>`;
+      root.appendChild(h);
     }
 
-    // Radar — severity counts per agent
-    const agents = reviewData?.agentResults || {};
-    const agentNames = Object.keys(agents);
-    if (agentNames.length) {
-      const palette = ['rgba(99,179,237,0.6)','rgba(244,135,113,0.6)','rgba(137,209,133,0.6)','rgba(204,167,0,0.6)'];
-      const datasets = agentNames.map((name, i) => {
-        const f = agents[name]?.findings || [];
+    function renderAgentStatus(d) {
+      const statuses = d.agentStatuses || {};
+      if (!Object.keys(statuses).length) return;
+      const sec = document.createElement('div');
+      sec.innerHTML = '<h2>Agent Results</h2>';
+      const chips = document.createElement('div');
+      chips.className = 'agent-chips';
+      const icons = { pass: '✅', warn: '⚠️', fail: '❌', error: '💥' };
+      for (const [name, status] of Object.entries(statuses)) {
+        const cls = ['pass','warn','fail','error'].includes(status) ? status : 'error';
+        const summary = d.agentResults?.[name]?.summary ?? '';
+        const chip = document.createElement('span');
+        chip.className = `chip chip-${cls}`;
+        chip.title = summary;
+        chip.textContent = `${icons[cls] ?? '❓'} ${name}`;
+        chips.appendChild(chip);
+      }
+      sec.appendChild(chips);
+      if (d.challengeResponses?.length) {
+        const ack = d.challengeResponses.filter(c => c.response?.challengeResponse?.assessment !== 'disputed').length;
+        const p = document.createElement('p');
+        p.style.cssText = 'font-size:0.82rem;opacity:0.75;margin:4px 0 0;';
+        p.textContent = `Builder challenged on ${d.challengeResponses.length} critical finding(s); ${ack} acknowledged.`;
+        sec.appendChild(p);
+      }
+      root.appendChild(sec);
+    }
+
+    function renderSeverityRadar(d) {
+      const agents = d.agentResults || {};
+      const names = Object.keys(agents);
+      if (!names.length) return;
+      const palette = [
+        'rgba(99,179,237,0.55)',
+        'rgba(244,135,113,0.55)',
+        'rgba(137,209,133,0.55)',
+        'rgba(204,167,0,0.55)',
+      ];
+      const datasets = names.map((name, i) => {
+        const findings = agents[name]?.findings || [];
         return {
           label: name,
-          data: ['critical','high','medium','low'].map(s => f.filter(x => x.severity === s).length),
+          data: ['critical','high','medium','low'].map(s => findings.filter(f => f.severity === s).length),
           backgroundColor: palette[i % palette.length],
-          borderColor: palette[i % palette.length].replace('0.6','1'),
-          borderWidth: 1,
+          borderColor: palette[i % palette.length].replace('0.55','1'),
+          borderWidth: 1.5,
+          pointRadius: 3,
         };
       });
-      const radarWrap = document.createElement('div');
-      radarWrap.className = 'chart-wrap';
-      radarWrap.innerHTML = '<div class="section-title">Severity Distribution by Agent</div><canvas id="radar"></canvas>';
-      root.appendChild(radarWrap);
-      new Chart(document.getElementById('radar'), {
+      const sec = document.createElement('div');
+      sec.innerHTML = '<h2>Severity Distribution by Agent</h2>';
+      const wrap = document.createElement('div');
+      wrap.style.cssText = 'max-width:380px;';
+      const canvas = document.createElement('canvas');
+      wrap.appendChild(canvas);
+      sec.appendChild(wrap);
+      root.appendChild(sec);
+      new Chart(canvas, {
         type: 'radar',
         data: { labels: ['Critical','High','Medium','Low'], datasets },
         options: {
-          scales: { r: { ticks: { color:'#ccc', backdropColor:'transparent' }, grid:{ color:'#444' }, pointLabels:{ color:'#ccc' } } },
-          plugins: { legend: { labels: { color: '#ccc' } } },
+          scales: {
+            r: {
+              ticks: { color:'#aaa', backdropColor:'transparent', stepSize: 1 },
+              grid: { color:'#444' },
+              pointLabels: { color:'#ccc', font: { size: 11 } },
+              beginAtZero: true,
+            },
+          },
+          plugins: { legend: { labels: { color:'#ccc', font: { size: 11 } } } },
         },
       });
     }
 
-    if (!findings.length && !agentNames.length) {
-      root.textContent = 'No review data — run a review first.';
+    function renderSkepticEvidence(d) {
+      const skeptic = d.agentResults?.skeptic || {};
+      const evidence = skeptic.evidence;
+      if (!evidence) return;
+
+      const sec = document.createElement('div');
+      sec.innerHTML = `<h2>Skeptic — Shadow Execution Evidence
+        <span style="font-weight:normal;font-size:0.78rem;opacity:0.65;margin-left:8px;">
+          Confidence: ${skeptic.confidence ?? '—'}/100
+        </span></h2>`;
+      root.appendChild(sec);
+
+      const grid = document.createElement('div');
+      grid.className = 'chart-grid';
+      sec.appendChild(grid);
+
+      // Failure Timeline
+      const ft = evidence.failureTimeline || [];
+      if (ft.length) {
+        const card = makeCard('Failure Timeline');
+        const canvas = document.createElement('canvas');
+        card.appendChild(canvas);
+        grid.appendChild(card);
+        new Chart(canvas, {
+          type: 'bar',
+          data: {
+            labels: ft.map(p => p.label || `#${p.index}`),
+            datasets: [
+              { label: 'Passed', data: ft.map(p => p.passed ? 1 : 0), backgroundColor: 'rgba(137,209,133,0.65)' },
+              { label: 'Failed', data: ft.map(p => p.failed ? 1 : 0), backgroundColor: 'rgba(244,135,113,0.65)' },
+            ],
+          },
+          options: barOpts({ stacked: true }),
+        });
+      }
+
+      // Endpoint Heatmap
+      const eh = evidence.endpointHeatmap || [];
+      if (eh.length) {
+        const card = makeCard('Endpoint Heatmap');
+        const canvas = document.createElement('canvas');
+        card.appendChild(canvas);
+        grid.appendChild(card);
+        new Chart(canvas, {
+          type: 'bar',
+          data: {
+            labels: eh.map(e => e.endpoint),
+            datasets: [
+              { label: 'Passed', data: eh.map(e => e.passed), backgroundColor: 'rgba(137,209,133,0.65)' },
+              { label: 'Failed', data: eh.map(e => e.failed), backgroundColor: 'rgba(244,135,113,0.65)' },
+            ],
+          },
+          options: barOpts({ stacked: false }),
+        });
+      }
+
+      // Latency Distribution
+      const ld = evidence.latencyDistribution || {};
+      const before = ld.before || [];
+      const after  = ld.after  || [];
+      if (before.length || after.length) {
+        const card = makeCard(`Latency Distribution (${ld.unit || 'ms'})`);
+        const canvas = document.createElement('canvas');
+        card.appendChild(canvas);
+        grid.appendChild(card);
+        const maxLen = Math.max(before.length, after.length);
+        const labels = Array.from({ length: maxLen }, (_, i) => `#${i + 1}`);
+        new Chart(canvas, {
+          type: 'line',
+          data: {
+            labels,
+            datasets: [
+              {
+                label: 'Before',
+                data: before,
+                borderColor: 'rgba(99,179,237,0.8)',
+                backgroundColor: 'rgba(99,179,237,0.15)',
+                fill: true, tension: 0.3, pointRadius: 3,
+              },
+              {
+                label: 'After',
+                data: after,
+                borderColor: 'rgba(244,135,113,0.8)',
+                backgroundColor: 'rgba(244,135,113,0.15)',
+                fill: true, tension: 0.3, pointRadius: 3,
+              },
+            ],
+          },
+          options: {
+            scales: {
+              y: { beginAtZero: true, ticks: { color:'#aaa' }, grid: { color:'#333' } },
+              x: { ticks: { color:'#aaa' }, grid: { color:'#333' } },
+            },
+            plugins: { legend: { labels: { color:'#ccc', font:{size:10} } } },
+          },
+        });
+      }
+
+      // User Journey Failures
+      const journeys = evidence.userJourneyFailures;
+      if (journeys?.length) {
+        const card = makeCard('User Journey Failures');
+        const ul = document.createElement('ul');
+        ul.className = 'journey-list';
+        journeys.forEach(j => {
+          const li = document.createElement('li');
+          li.innerHTML = `<div class="j-name">${j.name ?? 'unknown journey'}</div>` +
+            (j.error ? `<div class="j-err">${j.error.slice(0,200)}</div>` : '');
+          ul.appendChild(li);
+        });
+        card.appendChild(ul);
+        grid.appendChild(card);
+      }
+
+      // Per-finding confidence bar
+      const sFindings = skeptic.findings || [];
+      if (sFindings.length) {
+        const colors = sFindings.map(f =>
+          f.severity === 'high'   ? 'rgba(244,135,113,0.72)' :
+          f.severity === 'medium' ? 'rgba(204,167,0,0.72)'   : 'rgba(137,209,133,0.72)'
+        );
+        const confSec = document.createElement('div');
+        confSec.className = 'chart-full';
+        confSec.innerHTML = '<h3>Per-Finding Confidence (Skeptic)</h3>';
+        const canvas = document.createElement('canvas');
+        confSec.appendChild(canvas);
+        sec.appendChild(confSec);
+        new Chart(canvas, {
+          type: 'bar',
+          data: {
+            labels: sFindings.map((f, i) => f.category ? `${f.category} #${i+1}` : `Finding ${i+1}`),
+            datasets: [{
+              label: 'Confidence',
+              data: sFindings.map(f => f.confidence ?? 0),
+              backgroundColor: colors,
+              borderColor: colors.map(c => c.replace('0.72','1')),
+              borderWidth: 1,
+            }],
+          },
+          options: barOpts({ maxY: 100 }),
+        });
+      }
+    }
+
+    function renderFlowDiagram(d) {
+      const flow = d.agentResults?.skeptic?.flow;
+      if (!flow || (!flow.nodes?.length && !flow.edges?.length)) return;
+      const sec = document.createElement('div');
+      sec.innerHTML = '<h2>System Flow — Import / Dependency Graph</h2>';
+      if (flow.edges?.length) {
+        flow.edges.forEach(e => {
+          const row = document.createElement('div');
+          row.className = 'flow-edge';
+          row.innerHTML = `<span>${e.from}</span><span class="flow-arrow">→</span><span>${e.to}</span>`;
+          sec.appendChild(row);
+        });
+      } else if (flow.nodes?.length) {
+        const wrap = document.createElement('div');
+        wrap.className = 'flow-wrap';
+        flow.nodes.forEach(n => {
+          const node = document.createElement('span');
+          node.className = 'flow-node';
+          node.textContent = n.label || n.id;
+          wrap.appendChild(node);
+        });
+        sec.appendChild(wrap);
+      }
+      root.appendChild(sec);
+    }
+
+    function makeCard(title) {
+      const card = document.createElement('div');
+      card.className = 'chart-card';
+      card.innerHTML = `<h3>${title}</h3>`;
+      return card;
+    }
+
+    function barOpts({ stacked = false, maxY } = {}) {
+      return {
+        scales: {
+          y: {
+            beginAtZero: true,
+            ...(maxY != null && { max: maxY }),
+            ticks: { color:'#aaa' },
+            grid: { color:'#333' },
+            stacked,
+          },
+          x: {
+            ticks: { color:'#aaa', maxRotation: 35 },
+            grid: { color:'#333' },
+            stacked,
+          },
+        },
+        plugins: { legend: { labels: { color:'#ccc', font:{size:10} } } },
+      };
     }
   </script>
 </body>

@@ -1,33 +1,204 @@
 /**
- * attacker — adversarial agent that hunts for security vulnerabilities,
- * injection risks, insecure defaults, and attack surfaces.
+ * attacker — Adversarial Security Agent
+ *
+ * 3-step exploit-proof pipeline:
+ *
+ *   Step 1 — Static analysis (gpt-4o)
+ *     Scans the code for security vulnerabilities. Produces structured findings
+ *     with CWE IDs, severity, attack vector, impact, and remediation advice.
+ *
+ *   Step 2 — PoC generation (gpt-4o-mini, high/critical only)
+ *     For every high or critical finding, asks the model to generate a
+ *     self-contained Node.js script that mocks the vulnerable logic inline
+ *     and attempts to trigger the flaw with a crafted input.
+ *
+ *   Step 3 — Shadow execution (shadow/runner)
+ *     Runs each PoC in an isolated child_process (5 s timeout).
+ *     If the script exits 0 and prints "CONFIRMED", exploitProof.confirmed = true.
  *
  * Output shape:
  * {
  *   agent: "attacker",
  *   status: "pass" | "warn" | "fail",
- *   findings: [{ line, type, description, severity, cwe, suggestion }],
+ *   findings: [{
+ *     line, type, description, severity, cwe, attackVector, impact,
+ *     suggestion, exploitProof: { confirmed, output }
+ *   }],
  *   summary: string
  * }
  */
+
+const openai         = require('../core/openai');
+const { runSnippet } = require('../shadow/runner');
+
+// ─── Prompts ─────────────────────────────────────────────────────────────────
+
+const STATIC_SYSTEM = `You are an adversarial security agent performing a thorough static security review.
+
+For each vulnerability you find, output one finding with:
+- line: approximate line number (number) where the vulnerability is present
+- type: short vulnerability name (e.g. "SQL Injection", "Path Traversal", "Command Injection")
+- description: what is vulnerable and how an attacker could exploit it
+- severity: "critical" | "high" | "medium" | "low"
+- cwe: CWE number only (e.g. 89) — omit if not applicable
+- attackVector: "network" | "local" | "adjacent" | "physical"
+- impact: one sentence on what damage a successful exploit causes
+- suggestion: one sentence on how to fix it
+
+Focus on OWASP Top 10: injection, broken auth, sensitive data exposure, XXE, broken access control,
+security misconfiguration, XSS, insecure deserialization, known-vulnerable dependencies, insufficient logging.
+
+Respond with valid JSON only — no markdown, no extra text:
+{"findings": [...], "summary": "string"}`;
+
+const POC_SYSTEM = `You are a security researcher writing proof-of-concept (PoC) exploit scripts.
+
+Given a vulnerability and the original code, write a self-contained Node.js script with NO external npm packages.
+Rules:
+1. Copy or mock the vulnerable logic inline — do not require the original file.
+2. Craft a malicious input that triggers the flaw.
+3. If you can demonstrate the vulnerability: print "CONFIRMED" to stdout and exit with code 0.
+4. If you cannot demonstrate it in isolation: print "NOT_CONFIRMED" and exit with code 1.
+
+Output ONLY the Node.js code — no markdown fences, no explanation.`;
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+function normaliseFindings(raw) {
+  return (raw || []).map(f => ({
+    line:         typeof f.line === 'number' ? f.line : undefined,
+    type:         String(f.type        ?? 'vulnerability'),
+    description:  String(f.description ?? ''),
+    severity:     ['critical','high','medium','low'].includes(String(f.severity).toLowerCase())
+                    ? String(f.severity).toLowerCase() : 'medium',
+    cwe:          f.cwe != null ? String(f.cwe) : undefined,
+    attackVector: f.attackVector ?? undefined,
+    impact:       String(f.impact      ?? ''),
+    suggestion:   String(f.suggestion  ?? ''),
+    exploitProof: { confirmed: false, output: null },
+  }));
+}
+
+// ─── Step 1: Static analysis ──────────────────────────────────────────────────
+
+async function staticAnalysis(code, filePath, language, builderContext) {
+  const userContent = [
+    builderContext ? `Context from builder: ${builderContext}\n\n` : '',
+    `File: ${filePath}\nLanguage: ${language}\n\n`,
+    `Code:\n\`\`\`\n${code}\n\`\`\`\n\n`,
+    'Find all security vulnerabilities. Output JSON only.',
+  ].join('');
+
+  const completion = await openai.chat.completions.create({
+    model: 'gpt-4o',
+    temperature: 0.1,
+    response_format: { type: 'json_object' },
+    messages: [
+      { role: 'system', content: STATIC_SYSTEM },
+      { role: 'user',   content: userContent   },
+    ],
+  });
+
+  const raw    = completion.choices[0]?.message?.content ?? '{}';
+  const parsed = JSON.parse(raw);
+  return {
+    findings: normaliseFindings(parsed.findings),
+    summary:  typeof parsed.summary === 'string' ? parsed.summary : 'Attacker: analysis complete.',
+  };
+}
+
+// ─── Step 2: PoC generation ───────────────────────────────────────────────────
+
+async function generatePoC(finding, code) {
+  const userContent = [
+    `Vulnerability: ${finding.type}`,
+    `Description: ${finding.description}`,
+    `CWE: ${finding.cwe ? `CWE-${finding.cwe}` : 'N/A'}`,
+    '',
+    'Original code (for context — mock the logic inline, do NOT require this file):',
+    '```',
+    code.slice(0, 3000),
+    '```',
+    '',
+    'Write a self-contained Node.js PoC that demonstrates this vulnerability.',
+  ].join('\n');
+
+  const completion = await openai.chat.completions.create({
+    model: 'gpt-4o-mini',
+    temperature: 0.2,
+    messages: [
+      { role: 'system', content: POC_SYSTEM  },
+      { role: 'user',   content: userContent },
+    ],
+  });
+
+  const raw = (completion.choices[0]?.message?.content ?? '').trim();
+  return raw
+    .replace(/^```(?:js|javascript)?\s*/i, '')
+    .replace(/\s*```\s*$/i, '')
+    .trim();
+}
+
+// ─── Step 3: Shadow execution ────────────────────────────────────────────────
+
+async function runPoC(poc) {
+  if (!poc) return { confirmed: false, output: null };
+  const result = await runSnippet(poc, 'javascript');
+  return {
+    confirmed: result.executed && result.exitCode === 0 && result.stdout.includes('CONFIRMED'),
+    output:    (result.stdout || result.stderr || '').slice(0, 300),
+  };
+}
+
+// ─── Entry point ─────────────────────────────────────────────────────────────
 
 /**
  * @param {object} payload
  * @param {string}   payload.code
  * @param {string}   payload.filePath
  * @param {string}   payload.language
- * @param {string}   [payload.diff]
- * @param {object[]} [payload.context]
+ * @param {string}   [payload.builderContext]  — enriched context from orchestrator Phase 1
  * @returns {Promise<object>}
  */
 async function run(payload) {
-  // TODO: implement adversarial security analysis
-  return {
-    agent: 'attacker',
-    status: 'pass',
-    findings: [],
-    summary: 'Attacker agent not yet implemented.',
-  };
+  const { code, filePath, language, builderContext } = payload;
+
+  // ── Step 1: Static vulnerability scan ─────────────────────────────────────
+  let findings, summary;
+  try {
+    ({ findings, summary } = await staticAnalysis(code, filePath, language, builderContext));
+  } catch (err) {
+    console.error('[attacker] static analysis error:', err.message);
+    return {
+      agent:    'attacker',
+      status:   'warn',
+      findings: [],
+      summary:  `Attacker static analysis failed: ${err.message}`,
+    };
+  }
+
+  // ── Steps 2 + 3: PoC generation + execution (high/critical only) ──────────
+  const exploitTargets = findings.filter(f => f.severity === 'critical' || f.severity === 'high');
+
+  await Promise.all(
+    exploitTargets.map(async (finding) => {
+      try {
+        const poc = await generatePoC(finding, code);
+        finding.exploitProof = await runPoC(poc);
+      } catch {
+        // PoC failure is non-fatal; exploitProof stays { confirmed: false, output: null }
+      }
+    })
+  );
+
+  // ── Status ────────────────────────────────────────────────────────────────
+  const hasCritical = findings.some(f => f.severity === 'critical');
+  const hasHigh     = findings.some(f => f.severity === 'high');
+  const status = hasCritical || hasHigh ? 'fail'
+               : findings.length > 0    ? 'warn'
+               : 'pass';
+
+  return { agent: 'attacker', status, findings, summary };
 }
 
 module.exports = { run };
