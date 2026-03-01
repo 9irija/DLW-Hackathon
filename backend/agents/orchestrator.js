@@ -357,8 +357,6 @@ async function run(payload) {
     summary,
     sessionId: payload.sessionId || null,
   };
-  if (builderResult.codeContext) result.codeContext = builderResult.codeContext;
-  return result;
 }
 
 module.exports = { run };

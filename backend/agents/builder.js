@@ -16,9 +16,12 @@
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
+require('dotenv').config();
 const openai = require('../core/openai');
 
-const BUILDER_MODEL = 'gpt-4o';
+// Codex integration: use CODEX_MODEL for code-specialized models (e.g. gpt-5-codex, gpt-5.2-codex),
+// else BUILDER_MODEL, else default gpt-4o
+const BUILDER_MODEL = process.env.CODEX_MODEL || process.env.BUILDER_MODEL || 'gpt-4o';
 
 const BUILDER_SYSTEM_PROMPT = `You are the Builder Agent in a multi-agent AI code review system embedded in VS Code.
 
