@@ -357,8 +357,109 @@ async function run(payload) {
     summary,
     sessionId: payload.sessionId || null,
   };
-  if (builderResult.codeContext) result.codeContext = builderResult.codeContext;
+}
+
+// ─── Stepped-review: Builder start ───────────────────────────────────────────
+
+/**
+ * Step 1 of the human-in-the-loop flow.
+ * Runs Builder (Phase 1) and returns the enriched payload so downstream
+ * agents receive builder context. index.js stores this in the session.
+ *
+ * @param {object} payload — from core/parser.js buildReviewPayload()
+ * @returns {Promise<{ builderResult, enrichedPayload }>}
+ */
+async function startReview(payload) {
+  const { result: builderResult } = await safeRun(builderAgent, 'builder', payload);
+  const codeContext = builderResult.codeContext ?? null;
+
+  const enrichedPayload = {
+    ...payload,
+    codeContext,
+    builderContext: codeContext
+      ? `Code intent: ${codeContext.intent || 'unknown'}. ` +
+        `Entry points: ${(codeContext.entryPoints || []).join(', ') || 'none'}. ` +
+        `Potential risks flagged by builder: ${(codeContext.potentialRisks || []).join('; ') || 'none'}.`
+      : null,
+  };
+
+  return { builderResult, enrichedPayload };
+}
+
+// ─── Stepped-review: run one downstream agent ────────────────────────────────
+
+const AGENT_MAP = { factchecker, attacker, skeptic };
+
+/**
+ * Runs a single named downstream agent using the enriched payload
+ * (which already includes builder context from startReview).
+ *
+ * @param {string} agentName — 'factchecker' | 'attacker' | 'skeptic'
+ * @param {object} enrichedPayload
+ * @returns {Promise<object>} agent result
+ */
+async function runAgent(agentName, enrichedPayload) {
+  const agentModule = AGENT_MAP[agentName];
+  if (!agentModule) throw new Error(`Unknown agent: ${agentName}`);
+  const { result } = await safeRun(agentModule, agentName, enrichedPayload);
   return result;
 }
 
-module.exports = { run };
+// ─── Stepped-review finalizer ─────────────────────────────────────────────────
+
+/**
+ * Finalize a stepped review given already-collected agent results.
+ * Runs phases 3-5 (normalise, deduplicate, challenge loop, score, verdict).
+ * Agents that did not run contribute empty findings.
+ *
+ * @param {object} agentResults  — { builder?, factchecker?, attacker?, skeptic? }
+ * @param {object} payload       — original review payload (for sessionId, filePath)
+ */
+async function finalize(agentResults, payload) {
+  const builderResult  = agentResults.builder     || { agent: 'builder',     status: 'skipped', findings: [] };
+  const factResult     = agentResults.factchecker  || { agent: 'factchecker', status: 'skipped', findings: [] };
+  const attackResult   = agentResults.attacker     || { agent: 'attacker',    status: 'skipped', findings: [] };
+  const skepticResult  = agentResults.skeptic      || { agent: 'skeptic',     status: 'skipped', findings: [] };
+
+  const codeContext = builderResult.codeContext ?? null;
+
+  const allAgentResults = { builder: builderResult, factchecker: factResult, attacker: attackResult, skeptic: skepticResult };
+  const agentStatuses   = Object.fromEntries(
+    Object.entries(allAgentResults).map(([k, v]) => [k, v?.status ?? 'unknown'])
+  );
+
+  const allFindings = [
+    ...normaliseAll(builderResult.findings,  'builder'),
+    ...normaliseAll(factResult.findings,     'factchecker'),
+    ...normaliseAll(attackResult.findings,   'attacker'),
+    ...normaliseAll(skepticResult.findings,  'skeptic'),
+  ];
+
+  const prioritizedFindings = sortFindings(deduplicate(allFindings));
+  const challengeResponses  = await runChallengeLoop(codeContext, prioritizedFindings);
+
+  challengeResponses.forEach(({ finding, response }) => {
+    const match = prioritizedFindings.find(
+      f => f.source === finding.source && f.line === finding.line && f.description === finding.description
+    );
+    if (match) match.challengeResponse = response.challengeResponse ?? null;
+  });
+
+  const score   = calculateScore(prioritizedFindings, attackResult);
+  const verdict = determineVerdict(prioritizedFindings, allAgentResults);
+  const summary = buildSummary(verdict, score, prioritizedFindings, allAgentResults, codeContext, challengeResponses);
+
+  return {
+    agent: 'orchestrator',
+    verdict,
+    score,
+    agentResults:        allAgentResults,
+    agentStatuses,
+    prioritizedFindings,
+    challengeResponses,
+    summary,
+    sessionId: payload?.sessionId || null,
+  };
+}
+
+module.exports = { run, startReview, runAgent, finalize };

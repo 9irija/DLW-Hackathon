@@ -13,22 +13,10 @@ let lastResult = null;
 
 // ─── Backend call ─────────────────────────────────────────────────────────────
 
-/**
- * POST to the backend /review endpoint.
- * Sends code + file metadata the orchestrator needs.
- *
- * @param {object} opts
- * @param {string}  opts.code
- * @param {string}  opts.filePath
- * @param {string}  opts.language        — VS Code languageId (js, python, etc.)
- * @param {string}  [opts.workspaceRoot] — workspace root for skeptic test runner
- * @param {string}  opts.backendUrl
- * @returns {Promise<object>}            — orchestrator result
- */
-function postReview({ code, filePath, language, workspaceRoot, docs, backendUrl }) {
+function post(backendUrl, path, body) {
   return new Promise((resolve, reject) => {
-    const body    = JSON.stringify({ code, filePath, language, workspaceRoot, docs });
-    const url     = new URL('/review', backendUrl);
+    const bodyStr = JSON.stringify(body);
+    const url     = new URL(path, backendUrl);
     const lib     = url.protocol === 'https:' ? https : http;
     const options = {
       hostname: url.hostname,
@@ -37,137 +25,215 @@ function postReview({ code, filePath, language, workspaceRoot, docs, backendUrl 
       method:   'POST',
       headers:  {
         'Content-Type':   'application/json',
-        'Content-Length': Buffer.byteLength(body),
+        'Content-Length': Buffer.byteLength(bodyStr),
       },
     };
-
     const req = lib.request(options, (res) => {
       let data = '';
-      res.on('data', (chunk) => (data += chunk));
+      res.on('data', chunk => (data += chunk));
       res.on('end', () => {
         try {
           const parsed = JSON.parse(data);
-          // Surface HTTP-level errors (400, 500) as thrown errors
           if (parsed.error) reject(new Error(parsed.error));
           else              resolve(parsed);
-        } catch {
-          reject(new Error('Invalid JSON from backend'));
-        }
+        } catch { reject(new Error('Invalid JSON from backend')); }
       });
     });
-
     req.on('error', reject);
-    req.write(body);
+    req.write(bodyStr);
     req.end();
   });
 }
 
-// ─── Shared review handler ────────────────────────────────────────────────────
+// ─── Stepped review ───────────────────────────────────────────────────────────
 
 /**
- * Run a review, update all panels, and show a verdict notification.
- * Called by all review triggers (file, selection, with-docs, auto-save).
- * @param {Array} [docs]  — [{ name, content }] for factchecker doc pass
+ * Human-in-the-loop review with 3 checkpoints:
+ *   1. After Builder   → Approve / Stop
+ *   2. After Factchecker → Approve / Stop & Get Verdict
+ *   3. After Attacker  → Run Skeptic? Yes / No — then Finalize
  */
-async function runReview(context, code, filePath, language, silent = false, docs = []) {
+async function runReviewStepped(context, code, filePath, language, docs = []) {
   const cfg           = vscode.workspace.getConfiguration('codeReview');
   const backendUrl    = cfg.get('backendUrl') || 'http://127.0.0.1:3001';
   const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
 
-  lastResult = await postReview({ code, filePath, language, workspaceRoot, docs, backendUrl });
+  // ── Step 1: Builder ─────────────────────────────────────────────────────────
+  let startResult;
+  await vscode.window.withProgress(
+    { location: vscode.ProgressLocation.Notification, title: 'Step 1/3 — Builder analysing code…', cancellable: false },
+    async () => {
+      startResult = await post(backendUrl, '/review/start', { code, filePath, language, workspaceRoot, docs });
+    }
+  );
 
-  // Open / refresh both webview panels so they always show current results
-  FindingsPanel.show(context, lastResult);
-  SkepticChartsPanel.show(context, lastResult);
+  const { sessionId, builderResult } = startResult;
+  AgentStatusPanel.refresh(context, { agentResults: { builder: builderResult } });
 
-  // Update sidebar tree providers
-  AgentStatusPanel.refresh(context, lastResult);
-  VerdictPanel.refresh(context, lastResult);
+  // ── Checkpoint 1: after Builder ─────────────────────────────────────────────
+  const risks    = builderResult?.codeContext?.potentialRisks?.slice(0, 3).join(', ') || 'none flagged';
+  const choice1  = await vscode.window.showInformationMessage(
+    `Builder complete — Potential risks: ${risks}.\nContinue to Factchecker?`,
+    { modal: true },
+    'Approve & Continue',
+    'Stop Review',
+  );
 
-  // Verdict notification (skip on silent auto-save)
-  if (!silent) {
-    const { verdict, score } = lastResult;
-    const icon = { approve: '✅', 'request-changes': '⚠️', block: '🚫' }[verdict] ?? '❓';
-    vscode.window.showInformationMessage(
-      `${icon} Code review complete: ${(verdict ?? 'unknown').toUpperCase()} — Score ${score ?? '—'}/100`
+  if (choice1 !== 'Approve & Continue') {
+    const partial = await post(backendUrl, '/review/finalize', { sessionId });
+    lastResult = partial;
+    FindingsPanel.show(context, partial);
+    VerdictPanel.refresh(context, partial);
+    return vscode.window.showWarningMessage('Review stopped after Builder. Partial verdict generated.');
+  }
+
+  // ── Step 2: Factchecker ──────────────────────────────────────────────────────
+  let factResult;
+  await vscode.window.withProgress(
+    { location: vscode.ProgressLocation.Notification, title: 'Step 2/3 — Factchecker running…', cancellable: false },
+    async () => {
+      const r = await post(backendUrl, '/review/next', { sessionId, agent: 'factchecker' });
+      factResult = r.agentResult;
+    }
+  );
+
+  // Show factchecker findings immediately so user can review before deciding
+  const partial1 = { agentResults: { builder: builderResult, factchecker: factResult }, prioritizedFindings: [] };
+  FindingsPanel.show(context, partial1);
+  AgentStatusPanel.refresh(context, partial1);
+
+  // ── Checkpoint 2: after Factchecker ─────────────────────────────────────────
+  const factCount  = factResult?.findings?.length ?? 0;
+  const factStatus = factResult?.status ?? 'unknown';
+  const choice2    = await vscode.window.showWarningMessage(
+    `Factchecker: ${factCount} finding(s) [${factStatus}].\nContinue to Security Scan (Attacker)?`,
+    { modal: true },
+    'Approve & Continue',
+    'Stop & Get Verdict',
+  );
+
+  if (choice2 !== 'Approve & Continue') {
+    const partial = await post(backendUrl, '/review/finalize', { sessionId });
+    lastResult = partial;
+    FindingsPanel.show(context, partial);
+    SkepticChartsPanel.show(context, partial);
+    AgentStatusPanel.refresh(context, partial);
+    VerdictPanel.refresh(context, partial);
+    const icon = { approve: '✅', 'request-changes': '⚠️', block: '🚫' }[partial.verdict] ?? '❓';
+    return vscode.window.showInformationMessage(
+      `${icon} Review stopped after Factchecker — ${partial.verdict?.toUpperCase()} | Score ${partial.score}/100`
     );
   }
+
+  // ── Step 3: Attacker ────────────────────────────────────────────────────────
+  let attackResult;
+  await vscode.window.withProgress(
+    { location: vscode.ProgressLocation.Notification, title: 'Step 3/3 — Security scan running…', cancellable: false },
+    async () => {
+      const r = await post(backendUrl, '/review/next', { sessionId, agent: 'attacker' });
+      attackResult = r.agentResult;
+    }
+  );
+
+  // Show attacker findings immediately
+  const partial2 = { agentResults: { builder: builderResult, factchecker: factResult, attacker: attackResult }, prioritizedFindings: [] };
+  FindingsPanel.show(context, partial2);
+  AgentStatusPanel.refresh(context, partial2);
+
+  // ── Checkpoint 3: ask about Skeptic ─────────────────────────────────────────
+  const attackCount   = attackResult?.findings?.length ?? 0;
+  const confirmedPocs = (attackResult?.findings || []).filter(f => f.exploitProof?.confirmed).length;
+  const pocStr        = confirmedPocs ? ` (${confirmedPocs} exploit confirmed!)` : '';
+  const choice3       = await vscode.window.showWarningMessage(
+    `Attacker: ${attackCount} vulnerability/ies found${pocStr}.\nRun Skeptic for enhanced review?`,
+    { modal: true },
+    'Yes — Run Skeptic',
+    'No — Get Verdict Now',
+  );
+
+  if (choice3 === 'Yes — Run Skeptic') {
+    await vscode.window.withProgress(
+      { location: vscode.ProgressLocation.Notification, title: 'Enhanced review — Skeptic running…', cancellable: false },
+      async () => {
+        await post(backendUrl, '/review/next', { sessionId, agent: 'skeptic' });
+      }
+    );
+  }
+
+  // ── Finalize: orchestrate all collected results ──────────────────────────────
+  const finalResult = await post(backendUrl, '/review/finalize', { sessionId });
+  lastResult = finalResult;
+  FindingsPanel.show(context, finalResult);
+  SkepticChartsPanel.show(context, finalResult);
+  AgentStatusPanel.refresh(context, finalResult);
+  VerdictPanel.refresh(context, finalResult);
+
+  const icon = { approve: '✅', 'request-changes': '⚠️', block: '🚫' }[finalResult.verdict] ?? '❓';
+  vscode.window.showInformationMessage(
+    `${icon} Review complete: ${finalResult.verdict?.toUpperCase()} — Score ${finalResult.score}/100`
+  );
 }
 
 // ─── Extension activation ─────────────────────────────────────────────────────
 
 /** @param {vscode.ExtensionContext} context */
 function activate(context) {
-  // Register sidebar tree providers on startup
   AgentStatusPanel.register(context);
   VerdictPanel.register(context);
 
-  // ── Review current file ──────────────────────────────────────────────────
+  // ── Review current file (stepped) ────────────────────────────────────────
   context.subscriptions.push(
     vscode.commands.registerCommand('codeReview.reviewFile', async () => {
       const editor = vscode.window.activeTextEditor;
       if (!editor) return vscode.window.showWarningMessage('No active editor found.');
-
-      await vscode.window.withProgress(
-        { location: vscode.ProgressLocation.Notification, title: 'Running code review agents…', cancellable: false },
-        async () => {
-          try {
-            await runReview(
-              context,
-              editor.document.getText(),
-              editor.document.fileName,
-              editor.document.languageId,
-            );
-          } catch (err) {
-            console.error('[CodeReview] reviewFile error:', err);
-            vscode.window.showErrorMessage(`Review failed: ${err.message || String(err)}`);
-          }
-        }
-      );
+      try {
+        await runReviewStepped(
+          context,
+          editor.document.getText(),
+          editor.document.fileName,
+          editor.document.languageId,
+        );
+      } catch (err) {
+        console.error('[CodeReview] reviewFile error:', err);
+        vscode.window.showErrorMessage(`Review failed: ${err.message || String(err)}`);
+      }
     })
   );
 
-  // ── Review selection ─────────────────────────────────────────────────────
+  // ── Review selection (stepped) ───────────────────────────────────────────
   context.subscriptions.push(
     vscode.commands.registerCommand('codeReview.reviewSelection', async () => {
       const editor = vscode.window.activeTextEditor;
       if (!editor || editor.selection.isEmpty) {
         return vscode.window.showWarningMessage('Select some code first.');
       }
-
-      await vscode.window.withProgress(
-        { location: vscode.ProgressLocation.Notification, title: 'Reviewing selection…', cancellable: false },
-        async () => {
-          try {
-            await runReview(
-              context,
-              editor.document.getText(editor.selection),
-              editor.document.fileName,
-              editor.document.languageId,
-            );
-          } catch (err) {
-            vscode.window.showErrorMessage(`Review failed: ${err.message}`);
-          }
-        }
-      );
+      try {
+        await runReviewStepped(
+          context,
+          editor.document.getText(editor.selection),
+          editor.document.fileName,
+          editor.document.languageId,
+        );
+      } catch (err) {
+        console.error('[CodeReview] reviewSelection error:', err);
+        vscode.window.showErrorMessage(`Review failed: ${err.message || String(err)}`);
+      }
     })
   );
 
-  // ── Review file + external docs ──────────────────────────────────────────
+  // ── Review file + external docs (stepped) ────────────────────────────────
   context.subscriptions.push(
     vscode.commands.registerCommand('codeReview.reviewWithDocs', async () => {
       const editor = vscode.window.activeTextEditor;
       if (!editor) return vscode.window.showWarningMessage('No active editor found.');
 
-      // Let user pick one or more documentation files
       const uris = await vscode.window.showOpenDialog({
-        canSelectMany:    true,
-        openLabel:        'Select documentation file(s)',
-        filters:          { 'Documents': ['md','txt','rst','adoc','html'] },
+        canSelectMany: true,
+        openLabel:     'Select documentation file(s)',
+        filters:       { 'Documents': ['md', 'txt', 'rst', 'adoc', 'html'] },
       });
-      if (!uris || !uris.length) return; // cancelled
+      if (!uris || !uris.length) return;
 
-      // Read each selected file as text
       const fs   = require('fs');
       const path = require('path');
       const docs = uris.map(uri => ({
@@ -175,58 +241,56 @@ function activate(context) {
         content: (() => { try { return fs.readFileSync(uri.fsPath, 'utf8'); } catch { return ''; } })(),
       })).filter(d => d.content);
 
-      if (!docs.length) {
-        return vscode.window.showWarningMessage('Could not read selected document(s).');
-      }
+      if (!docs.length) return vscode.window.showWarningMessage('Could not read selected document(s).');
 
-      await vscode.window.withProgress(
-        { location: vscode.ProgressLocation.Notification, title: `Reviewing with ${docs.length} doc(s)…`, cancellable: false },
-        async () => {
-          try {
-            await runReview(
-              context,
-              editor.document.getText(),
-              editor.document.fileName,
-              editor.document.languageId,
-              false,
-              docs,
-            );
-          } catch (err) {
-            vscode.window.showErrorMessage(`Review failed: ${err.message}`);
-          }
-        }
-      );
+      try {
+        await runReviewStepped(
+          context,
+          editor.document.getText(),
+          editor.document.fileName,
+          editor.document.languageId,
+          docs,
+        );
+      } catch (err) {
+        console.error('[CodeReview] reviewWithDocs error:', err);
+        vscode.window.showErrorMessage(`Review failed: ${err.message || String(err)}`);
+      }
     })
   );
 
-  // ── Show findings (open panel, populate with last result) ────────────────
+  // ── Show findings ─────────────────────────────────────────────────────────
   context.subscriptions.push(
     vscode.commands.registerCommand('codeReview.showFindings', () =>
       FindingsPanel.show(context, lastResult)
     )
   );
 
-  // ── Show charts (open panel, populate with last result) ──────────────────
+  // ── Show charts ───────────────────────────────────────────────────────────
   context.subscriptions.push(
     vscode.commands.registerCommand('codeReview.showCharts', () =>
       SkepticChartsPanel.show(context, lastResult)
     )
   );
 
-  // ── Auto-review on save ──────────────────────────────────────────────────
+  // ── Auto-review on save (non-stepped — silent, full pipeline) ────────────
   context.subscriptions.push(
     vscode.workspace.onDidSaveTextDocument(async (document) => {
       const cfg = vscode.workspace.getConfiguration('codeReview');
       if (!cfg.get('autoReviewOnSave')) return;
+      const backendUrl    = cfg.get('backendUrl') || 'http://127.0.0.1:3001';
+      const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
       try {
-        await runReview(
-          context,
-          document.getText(),
-          document.fileName,
-          document.languageId,
-          true,  // silent — no notification toast on auto-save
-        );
-      } catch { /* silent */ }
+        const body = {
+          code:          document.getText(),
+          filePath:      document.fileName,
+          language:      document.languageId,
+          workspaceRoot,
+        };
+        lastResult = await post(backendUrl, '/review', body);
+        FindingsPanel.show(context, lastResult);
+        AgentStatusPanel.refresh(context, lastResult);
+        VerdictPanel.refresh(context, lastResult);
+      } catch { /* silent on auto-save */ }
     })
   );
 

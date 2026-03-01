@@ -1,32 +1,82 @@
 # Multi-Agent AI Code Review — VS Code Extension
 
-Four specialized AI agents review your code, then an orchestrator synthesizes their findings into a single scored verdict: `approve / request-changes / block`.
+Four specialized AI agents review your code with **human verification at every stage**. The orchestrator manages the full pipeline and synthesizes findings into a scored verdict: `approve / request-changes / block`.
 
 ---
 
-## How It Works — End-to-End Pipeline
+## Human-in-the-Loop Review Flow
+
+The key feature of this extension is **three human checkpoints** built into the review pipeline. Each agent runs one at a time and pauses for your decision before proceeding.
+
+```
+[VS Code Extension — runReviewStepped()]
+        │
+        │  POST /review/start
+        ▼
+[Orchestrator — startReview()]
+  Runs Builder → enriches payload with codeContext
+        │
+        ▼
+  [CHECKPOINT 1] ── "Potential risks: X. Continue to Factchecker?"
+                        Approve & Continue  ──►  POST /review/next (factchecker)
+                        Stop Review         ──►  POST /review/finalize → partial verdict
+        │
+        │  POST /review/next { agent: 'factchecker' }
+        ▼
+[Orchestrator — runAgent('factchecker')]
+  Factchecker runs (inline + doc passes) → findings shown in panel
+        │
+        ▼
+  [CHECKPOINT 2] ── "N finding(s) found. Continue to Security Scan?"
+                        Approve & Continue  ──►  POST /review/next (attacker)
+                        Stop & Get Verdict  ──►  POST /review/finalize → partial verdict
+        │
+        │  POST /review/next { agent: 'attacker' }
+        ▼
+[Orchestrator — runAgent('attacker')]
+  Attacker runs (3-step exploit pipeline) → findings shown in panel
+        │
+        ▼
+  [CHECKPOINT 3] ── "N vulnerabilities found. Run Skeptic for enhanced review?"
+                        Yes — Run Skeptic  ──►  POST /review/next (skeptic)
+                                                then POST /review/finalize
+                        No — Get Verdict   ──►  POST /review/finalize (without skeptic)
+        │
+        ▼
+[Orchestrator — finalize()]
+  Normalise + deduplicate all findings
+  Builder challenge loop (critical findings only)
+  Score + verdict + summary → response
+        │
+        ▼
+[Frontend panels update: Findings, Charts, Agent Status, Verdict]
+```
+
+> Stopping early at any checkpoint still produces a full scored verdict based on the agents that ran.
+
+---
+
+## How It Works — Full Pipeline Detail
 
 ```
 [VS Code Extension]
-        │  POST /review  { code, filePath, language, workspaceRoot, docs? }
+        │  POST /review/start  { code, filePath, language, workspaceRoot, docs? }
         ▼
-[Express Backend — index.js]
+[Express Backend — index.js]  (thin HTTP layer)
   • Detect language, chunk code (1 500-char chunks, 200-char overlap)
   • Embed each chunk via text-embedding-3-small → store in SQLite (RAG)
   • Retrieve top-5 similar chunks from previous sessions as context
-  • Pass docs[] through to payload for factchecker document review
+  • Delegates all agent execution to Orchestrator
         │
         ▼
-[Orchestrator — orchestrator.js]
+[Orchestrator — orchestrator.js]  (sole agent manager)
         │
-        ├─ PHASE 1 ── Builder (gpt-4o, sequential first)
+        ├─ startReview() ── Builder (gpt-4o, always first)
         │    Analyses intent, entry points, dependencies, data flows,
         │    external calls, side effects, and preliminary risks.
         │    → Produces codeContext used to enrich all downstream prompts.
         │
-        ├─ PHASE 2 ── Parallel agents (all receive enrichedPayload)
-        │    │
-        │    ├─ Factchecker (gpt-4o-mini) — TWO PASSES
+        ├─ runAgent('factchecker') ── Factchecker (gpt-4o-mini) — TWO PASSES
         │    │    Pass 1 — Inline: compares every comment/docstring in the
         │    │             code against what the code actually does.
         │    │             Findings tagged with line number.
@@ -35,7 +85,7 @@ Four specialized AI agents review your code, then an orchestrator synthesizes th
         │    │             against the actual implementation.
         │    │             Findings tagged with docSource (filename).
         │    │
-        │    ├─ Attacker (gpt-4o + gpt-4o-mini + shadow/runner)
+        ├─ runAgent('attacker') ── Attacker (gpt-4o + gpt-4o-mini + shadow/runner)
         │    │    Step 1 — Static scan (gpt-4o): finds vulnerabilities,
         │    │             maps to CWE IDs, rates severity, describes impact.
         │    │    Step 2 — PoC generation (gpt-4o-mini, high/critical only):
@@ -45,13 +95,13 @@ Four specialized AI agents review your code, then an orchestrator synthesizes th
         │    │             if the PoC exits 0 and prints "CONFIRMED",
         │    │             exploitProof.confirmed = true.
         │    │
-        │    └─ Skeptic (shadow/runner + flowParser)
+        ├─ runAgent('skeptic') ── Skeptic (shadow/runner + flowParser) [optional]
         │         Runs the code (or full test suite if workspaceRoot provided)
         │         in an isolated child_process. Builds evidence charts:
         │         failure timeline, endpoint heatmap, latency distribution,
         │         user-journey failures. Parses import graph → flow diagram.
         │
-        ├─ PHASE 3 ── Normalise & deduplicate findings
+        └─ finalize() ── Normalise & deduplicate findings
         │    All agent outputs mapped to a common shape.
         │    Doc findings (line = null) are never deduplicated — all kept.
         │    Same line + same type across agents → keep highest severity.
@@ -216,9 +266,14 @@ Finding example (doc review):
 
 | Endpoint | Method | Body | Purpose |
 |---|---|---|---|
-| `/review`   | POST | see below | Run full multi-agent review |
-| `/decision` | POST | `{ logId, decision }` | Record human accept/reject/defer |
-| `/health`   | GET  | — | Liveness check |
+| `/review/start`    | POST | `{ code, filePath, language, workspaceRoot?, docs? }` | Step 1 — Run Builder, open session |
+| `/review/next`     | POST | `{ sessionId, agent }` | Step 2/3 — Run factchecker, attacker, or skeptic |
+| `/review/finalize` | POST | `{ sessionId }` | Final — Orchestrate all collected results → verdict |
+| `/review`          | POST | see below | Single-shot full pipeline (auto-save, backwards compat) |
+| `/decision`        | POST | `{ logId, decision }` | Record human accept/reject/defer |
+| `/health`          | GET  | — | Liveness check |
+
+**Stepped flow agent values for `/review/next`:** `"factchecker"` → `"attacker"` → `"skeptic"` (skeptic is optional)
 
 ### POST /review — request body
 
