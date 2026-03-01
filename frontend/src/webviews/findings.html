@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Code Review — Findings</title>
+  <style>
+    body { background: var(--vscode-editor-background); color: var(--vscode-foreground);
+           font-family: var(--vscode-font-family, sans-serif); padding: 20px; }
+    h2 { margin-bottom: 12px; }
+    .verdict-badge { display: inline-block; padding: 4px 12px; border-radius: 4px;
+                     font-weight: bold; margin-bottom: 16px; }
+    .approve         { background: #1e4620; color: #89d185; }
+    .request-changes { background: #4d3800; color: #cca700; }
+    .block           { background: #4d0000; color: #f48771; }
+    .agent-section { margin-bottom: 24px; }
+    .agent-title { font-weight: bold; margin-bottom: 8px; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+    th { background: var(--vscode-editor-lineHighlightBackground); padding: 6px 10px; text-align: left; }
+    td { padding: 6px 10px; border-bottom: 1px solid var(--vscode-panel-border); vertical-align: top; }
+    .severity-critical { color: #e51400; font-weight: bold; }
+    .severity-high     { color: #f48771; }
+    .severity-medium   { color: #cca700; }
+    .severity-low      { color: #89d185; }
+    .none { opacity: 0.5; font-style: italic; padding: 8px 0; }
+  </style>
+</head>
+<body>
+  <h2>Code Review Findings</h2>
+  <div id="root">Loading…</div>
+  <script>
+    /*INJECT_DATA*/
+    const root = document.getElementById('root');
+    if (!reviewData?.agentResults) {
+      root.textContent = 'No results — trigger a review from the command palette.';
+    } else {
+      const { verdict, score, agentResults } = reviewData;
+      let html = `<div class="verdict-badge ${verdict ?? 'approve'}">
+        Verdict: ${verdict ?? 'unknown'} &nbsp;|&nbsp; Score: ${score ?? '—'}/100
+      </div>`;
+      for (const [agent, data] of Object.entries(agentResults)) {
+        const findings = data?.findings || [];
+        html += `<div class="agent-section">
+          <div class="agent-title">${agent.toUpperCase()} — ${data?.status ?? 'unknown'}</div>`;
+        if (!findings.length) {
+          html += `<div class="none">No findings.</div>`;
+        } else {
+          html += `<table><thead><tr><th>Line</th><th>Severity</th><th>Issue</th><th>Suggestion</th></tr></thead><tbody>`;
+          html += findings.map(f =>
+            `<tr><td>${f.line||'—'}</td><td class="severity-${f.severity||''}">${f.severity||''}</td>
+             <td>${f.description||f.claim||f.type||''}</td><td>${f.suggestion||''}</td></tr>`
+          ).join('');
+          html += `</tbody></table>`;
+        }
+        html += `</div>`;
+      }
+      root.innerHTML = html;
+    }
+  </script>
+</body>
+</html>

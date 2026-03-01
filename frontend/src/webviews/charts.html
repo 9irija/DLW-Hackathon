@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Code Review — Skeptic Charts</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+  <style>
+    body { background: var(--vscode-editor-background); color: var(--vscode-foreground);
+           font-family: var(--vscode-font-family, sans-serif); padding: 20px; }
+    h2 { margin-bottom: 16px; }
+    .chart-wrap { max-width: 640px; margin-bottom: 40px; }
+    .section-title { font-size: 0.9rem; font-weight: bold; margin-bottom: 8px; opacity: 0.85; }
+    .overall { font-size: 2rem; font-weight: bold; text-align: center; }
+    .overall-label { text-align: center; opacity: 0.6; font-size: 0.85rem; margin-bottom: 24px; }
+  </style>
+</head>
+<body>
+  <h2>Skeptic Agent — Confidence Analysis</h2>
+  <div id="root"></div>
+  <script>
+    /*INJECT_DATA*/
+    const root    = document.getElementById('root');
+    const skeptic = reviewData?.agentResults?.skeptic || {};
+    const findings = skeptic.findings || [];
+    const overall  = skeptic.confidence ?? null;
+
+    if (overall !== null) {
+      root.innerHTML += `<div class="overall">${overall}</div>
+        <div class="overall-label">Overall Confidence Score (0–100)</div>`;
+    }
+
+    if (findings.length) {
+      const colors = findings.map(f =>
+        f.severity === 'high' ? 'rgba(244,135,113,0.75)' :
+        f.severity === 'medium' ? 'rgba(204,167,0,0.75)' : 'rgba(137,209,133,0.75)'
+      );
+      const wrap = document.createElement('div');
+      wrap.className = 'chart-wrap';
+      wrap.innerHTML = '<div class="section-title">Per-Finding Confidence</div><canvas id="bar"></canvas>';
+      root.appendChild(wrap);
+      new Chart(document.getElementById('bar'), {
+        type: 'bar',
+        data: {
+          labels: findings.map((f, i) => f.category ? `${f.category} #${i+1}` : `Finding ${i+1}`),
+          datasets: [{ label: 'Confidence', data: findings.map(f => f.confidence ?? 0),
+            backgroundColor: colors, borderColor: colors.map(c => c.replace('0.75','1')), borderWidth: 1 }],
+        },
+        options: {
+          scales: {
+            y: { beginAtZero: true, max: 100, ticks: { color: '#ccc' }, grid: { color: '#333' } },
+            x: { ticks: { color: '#ccc', maxRotation: 45 }, grid: { color: '#333' } },
+          },
+          plugins: { legend: { labels: { color: '#ccc' } } },
+        },
+      });
+    }
+
+    // Radar — severity counts per agent
+    const agents = reviewData?.agentResults || {};
+    const agentNames = Object.keys(agents);
+    if (agentNames.length) {
+      const palette = ['rgba(99,179,237,0.6)','rgba(244,135,113,0.6)','rgba(137,209,133,0.6)','rgba(204,167,0,0.6)'];
+      const datasets = agentNames.map((name, i) => {
+        const f = agents[name]?.findings || [];
+        return {
+          label: name,
+          data: ['critical','high','medium','low'].map(s => f.filter(x => x.severity === s).length),
+          backgroundColor: palette[i % palette.length],
+          borderColor: palette[i % palette.length].replace('0.6','1'),
+          borderWidth: 1,
+        };
+      });
+      const radarWrap = document.createElement('div');
+      radarWrap.className = 'chart-wrap';
+      radarWrap.innerHTML = '<div class="section-title">Severity Distribution by Agent</div><canvas id="radar"></canvas>';
+      root.appendChild(radarWrap);
+      new Chart(document.getElementById('radar'), {
+        type: 'radar',
+        data: { labels: ['Critical','High','Medium','Low'], datasets },
+        options: {
+          scales: { r: { ticks: { color:'#ccc', backdropColor:'transparent' }, grid:{ color:'#444' }, pointLabels:{ color:'#ccc' } } },
+          plugins: { legend: { labels: { color: '#ccc' } } },
+        },
+      });
+    }
+
+    if (!findings.length && !agentNames.length) {
+      root.textContent = 'No review data — run a review first.';
+    }
+  </script>
+</body>
+</html>
