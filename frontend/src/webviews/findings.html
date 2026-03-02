@@ -11,13 +11,33 @@
       background: var(--vscode-editor-background);
       color: var(--vscode-foreground);
       font-family: var(--vscode-font-family, 'Segoe UI', sans-serif);
-      font-size: 13px;
-      padding: 20px;
-      margin: 0;
+      font-size: 13px; padding: 20px; margin: 0;
     }
-    h1 { font-size: 1.15rem; margin: 0 0 16px; }
+    h1 { font-size: 1.15rem; margin: 0 0 12px; }
 
-    .review-header { display: flex; align-items: center; gap: 14px; margin-bottom: 20px; flex-wrap: wrap; }
+    /* ── Pipeline strip ──────────────────────────────────────────────── */
+    .pipeline {
+      display: flex; align-items: center; flex-wrap: wrap; gap: 6px;
+      padding: 10px 0 14px;
+      margin-bottom: 18px;
+      border-bottom: 1px solid var(--vscode-panel-border);
+    }
+    .pipeline-step {
+      display: inline-flex; align-items: center; gap: 4px;
+      padding: 4px 12px; border-radius: 14px;
+      font-size: 0.76rem; font-weight: 600;
+      border: 1px solid currentColor; white-space: nowrap;
+      cursor: default;
+    }
+    .pipeline-arrow { opacity: 0.35; font-size: 0.9rem; padding: 0 2px; flex-shrink: 0; }
+    .ps-pass    { color: #89d185; }
+    .ps-warn    { color: #cca700; }
+    .ps-fail    { color: #f48771; }
+    .ps-pending { color: #666; border-style: dashed; }
+    .ps-skipped { color: #555; border-style: dashed; opacity: 0.55; }
+
+    /* ── Review header ───────────────────────────────────────────────── */
+    .review-header { display: flex; align-items: center; gap: 14px; margin-bottom: 14px; flex-wrap: wrap; }
     .verdict-badge {
       display: inline-block; padding: 5px 14px; border-radius: 4px;
       font-weight: bold; font-size: 0.9rem;
@@ -31,21 +51,30 @@
     }
     .summary-text { font-size: 0.8rem; opacity: 0.75; max-width: 560px; line-height: 1.5; }
 
-    .counts { display: flex; gap: 10px; margin-bottom: 18px; flex-wrap: wrap; }
-    .count-badge {
-      padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-weight: bold;
+    /* ── Severity bar ────────────────────────────────────────────────── */
+    .sev-bar-wrap { margin-bottom: 16px; }
+    .sev-bar-track {
+      display: flex; height: 7px; border-radius: 4px; overflow: hidden;
+      background: rgba(128,128,128,0.12); width: 100%;
     }
+    .sev-bar-seg  { height: 100%; transition: width 0.55s ease; }
+    .sev-bar-labels { display: flex; gap: 12px; margin-top: 5px; flex-wrap: wrap; }
+    .sev-bar-lbl  { font-size: 0.72rem; font-weight: 600; }
+
+    /* ── Severity count badges ───────────────────────────────────────── */
+    .counts { display: flex; gap: 10px; margin-bottom: 18px; flex-wrap: wrap; }
+    .count-badge { padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-weight: bold; }
     .cnt-critical { background: rgba(229,20,0,0.15);   color: #e51400; }
     .cnt-high     { background: rgba(244,135,113,0.15); color: #f48771; }
     .cnt-medium   { background: rgba(204,167,0,0.15);   color: #cca700; }
     .cnt-low      { background: rgba(137,209,133,0.15); color: #89d185; }
 
+    /* ── Findings table ──────────────────────────────────────────────── */
     table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
     thead th {
       background: var(--vscode-editor-lineHighlightBackground);
       padding: 7px 10px; text-align: left;
-      border-bottom: 2px solid var(--vscode-panel-border);
-      white-space: nowrap;
+      border-bottom: 2px solid var(--vscode-panel-border); white-space: nowrap;
     }
     tbody tr { border-bottom: 1px solid var(--vscode-panel-border); }
     tbody tr:hover { background: var(--vscode-list-hoverBackground); }
@@ -60,8 +89,8 @@
       display: inline-block; padding: 1px 7px; border-radius: 3px;
       font-size: 0.7rem; font-weight: 600; white-space: nowrap;
     }
-    .src-builder     { background: rgba(99,179,237,0.15); color: #63b3ed; }
-    .src-factchecker { background: rgba(204,167,0,0.15);  color: #cca700; }
+    .src-builder     { background: rgba(99,179,237,0.15);  color: #63b3ed; }
+    .src-factchecker { background: rgba(204,167,0,0.15);   color: #cca700; }
     .src-attacker    { background: rgba(244,135,113,0.15); color: #f48771; }
     .src-skeptic     { background: rgba(137,209,133,0.15); color: #89d185; }
 
@@ -70,11 +99,8 @@
       border: 1px solid #f48771; border-radius: 3px; color: #f48771;
       margin-left: 4px; white-space: nowrap; vertical-align: middle;
     }
-
     .detail-row td {
-      padding: 3px 10px 7px 28px;
-      font-size: 0.78rem; opacity: 0.8;
-      border-bottom: none;
+      padding: 3px 10px 7px 28px; font-size: 0.78rem; opacity: 0.8; border-bottom: none;
     }
     .detail-label { font-weight: bold; color: var(--vscode-descriptionForeground); }
     .detail-mono  { font-family: monospace; }
@@ -88,9 +114,18 @@
       display: inline-block; font-size: 0.7rem; font-weight: bold;
       padding: 1px 7px; border-radius: 3px; margin-bottom: 4px;
     }
-    .assessment-acknowledged { background: rgba(204,167,0,0.2);  color: #cca700; }
-    .assessment-disputed     { background: rgba(99,179,237,0.2); color: #63b3ed; }
-    .assessment-requires_fix { background: rgba(244,135,113,0.2);color: #f48771; }
+    .assessment-acknowledged { background: rgba(204,167,0,0.2);   color: #cca700; }
+    .assessment-disputed     { background: rgba(99,179,237,0.2);  color: #63b3ed; }
+    .assessment-requires_fix { background: rgba(244,135,113,0.2); color: #f48771; }
+
+    /* ── In-progress banner ──────────────────────────────────────────── */
+    .in-progress-banner {
+      display: flex; align-items: center; gap: 10px;
+      padding: 8px 14px; border-radius: 5px; font-size: 0.82rem; margin-bottom: 16px;
+      background: rgba(99,179,237,0.08); border: 1px solid rgba(99,179,237,0.25);
+    }
+    .spin { display: inline-block; animation: spin 1.1s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
 
     .empty { opacity: 0.5; font-style: italic; padding: 12px 0; }
   </style>
@@ -102,17 +137,95 @@
 
     const root = document.getElementById('root');
     if (reviewData && reviewData.verdict) {
-      // Final result — full orchestrated view
       root.innerHTML = '';
       renderPage(reviewData);
     } else if (reviewData && reviewData.agentResults) {
-      // Intermediate stepped result — show per-agent findings collected so far
       root.innerHTML = '';
       renderIntermediate(reviewData);
     }
 
+    // ── Pipeline strip ────────────────────────────────────────────────────────
+    function renderPipeline(agentResults, agentStatuses) {
+      const STEPS = [
+        { id: 'builder',     label: 'Builder'     },
+        { id: 'factchecker', label: 'Factchecker' },
+        { id: 'attacker',    label: 'Attacker'    },
+        { id: 'skeptic',     label: 'Skeptic'     },
+      ];
+      const wrap = document.createElement('div');
+      wrap.className = 'pipeline';
+
+      STEPS.forEach((step, i) => {
+        if (i > 0) {
+          const arr = document.createElement('span');
+          arr.className = 'pipeline-arrow';
+          arr.textContent = '→';
+          wrap.appendChild(arr);
+        }
+        const status = agentStatuses?.[step.id] ?? agentResults?.[step.id]?.status ?? null;
+        let cls, icon;
+        if      (!status || status === 'pending') { cls = 'ps-pending'; icon = '⏳'; }
+        else if (status === 'skipped')            { cls = 'ps-skipped'; icon = '—';  }
+        else if (status === 'pass')               { cls = 'ps-pass';    icon = '✅'; }
+        else if (status === 'warn')               { cls = 'ps-warn';    icon = '⚠️'; }
+        else if (status === 'fail')               { cls = 'ps-fail';    icon = '❌'; }
+        else                                      { cls = 'ps-fail';    icon = '💥'; }
+
+        const node = document.createElement('div');
+        node.className = `pipeline-step ${cls}`;
+        const tip = agentResults?.[step.id]?.summary ?? '';
+        if (tip) node.title = tip;
+        node.innerHTML = `${icon} ${step.label}`;
+        if (status === 'skipped') {
+          node.innerHTML += ' <span style="font-size:0.65rem;opacity:0.65">(skipped)</span>';
+        }
+        wrap.appendChild(node);
+      });
+      return wrap;
+    }
+
+    // ── Severity bar ──────────────────────────────────────────────────────────
+    function renderSeverityBar(findings) {
+      const counts = { critical: 0, high: 0, medium: 0, low: 0 };
+      (findings || []).forEach(f => { if (counts[f.severity] !== undefined) counts[f.severity]++; });
+      const total = Object.values(counts).reduce((a, b) => a + b, 0);
+      if (!total) return null;
+
+      const colors = { critical: '#e51400', high: '#f48771', medium: '#cca700', low: '#89d185' };
+      const wrap   = document.createElement('div');
+      wrap.className = 'sev-bar-wrap';
+      const track  = document.createElement('div');
+      track.className = 'sev-bar-track';
+      const labels = document.createElement('div');
+      labels.className = 'sev-bar-labels';
+
+      for (const [sev, n] of Object.entries(counts)) {
+        if (!n) continue;
+        const pct = (n / total * 100).toFixed(2);
+        const seg = document.createElement('div');
+        seg.className = 'sev-bar-seg';
+        seg.style.cssText = `width:0;background:${colors[sev]}`;
+        track.appendChild(seg);
+        // Animate width in on next frame
+        requestAnimationFrame(() => requestAnimationFrame(() => { seg.style.width = pct + '%'; }));
+
+        const lbl = document.createElement('span');
+        lbl.className = 'sev-bar-lbl';
+        lbl.style.color = colors[sev];
+        lbl.textContent = `${n} ${sev}`;
+        labels.appendChild(lbl);
+      }
+      wrap.appendChild(track);
+      wrap.appendChild(labels);
+      return wrap;
+    }
+
+    // ── Final orchestrated view ───────────────────────────────────────────────
     function renderPage(d) {
-      const { verdict, score, summary, prioritizedFindings = [] } = d;
+      const { verdict, score, summary, prioritizedFindings = [], agentResults, agentStatuses } = d;
+
+      // Pipeline
+      root.appendChild(renderPipeline(agentResults, agentStatuses));
 
       // Header
       const header = document.createElement('div');
@@ -126,7 +239,11 @@
       header.appendChild(rev);
       root.appendChild(header);
 
-      // Severity counts
+      // Severity bar
+      const sevBar = renderSeverityBar(prioritizedFindings);
+      if (sevBar) root.appendChild(sevBar);
+
+      // Count badges
       const counts = { critical: 0, high: 0, medium: 0, low: 0 };
       prioritizedFindings.forEach(f => { if (counts[f.severity] !== undefined) counts[f.severity]++; });
       if (prioritizedFindings.length) {
@@ -158,7 +275,6 @@
       const tbody = document.createElement('tbody');
 
       prioritizedFindings.forEach((f, i) => {
-        // Main row
         const tr = document.createElement('tr');
         const cweHtml = f.cwe
           ? `<span class="cwe-badge" title="Common Weakness Enumeration">CWE-${escHtml(String(f.cwe))}</span>`
@@ -173,14 +289,15 @@
           `<td style="opacity:0.8">${escHtml(f.suggestion ?? '')}</td>`;
         tbody.appendChild(tr);
 
-        // Factchecker: claim / reality (+ docSource for external doc findings)
+        // Factchecker: claim / reality / docSource / docSection
         if (f.claim || f.reality) {
           const dr = document.createElement('tr');
           dr.className = 'detail-row';
           const parts = [];
-          if (f.docSource) parts.push(`<span class="detail-label">Doc:</span> <span style="font-style:italic;opacity:0.8">${escHtml(f.docSource)}</span>`);
-          if (f.claim)     parts.push(`<span class="detail-label">Claim:</span> <span class="detail-mono">${escHtml(f.claim)}</span>`);
-          if (f.reality)   parts.push(`<span class="detail-label">Reality:</span> <span class="detail-mono">${escHtml(f.reality)}</span>`);
+          if (f.docSource)  parts.push(`<span class="detail-label">Doc:</span> <span style="font-style:italic;opacity:0.8">${escHtml(f.docSource)}</span>`);
+          if (f.docSection) parts.push(`<span class="detail-label">Section:</span> <span class="detail-mono">${escHtml(f.docSection)}</span>`);
+          if (f.claim)      parts.push(`<span class="detail-label">Claim:</span> <span class="detail-mono">${escHtml(f.claim)}</span>`);
+          if (f.reality)    parts.push(`<span class="detail-label">Reality:</span> <span class="detail-mono">${escHtml(f.reality)}</span>`);
           dr.innerHTML = `<td colspan="7">${parts.join(' &nbsp;|&nbsp; ')}</td>`;
           tbody.appendChild(dr);
         }
@@ -195,7 +312,7 @@
           tbody.appendChild(dr);
         }
 
-        // Attacker: attackVector / impact
+        // Attacker: vector / impact
         if (f.attackVector || f.impact) {
           const dr = document.createElement('tr');
           dr.className = 'detail-row';
@@ -205,11 +322,15 @@
           dr.innerHTML = `<td colspan="7">${parts.join(' &nbsp;|&nbsp; ')}</td>`;
           tbody.appendChild(dr);
         }
+
+        // PoC exploit proof
         if (f.exploitProof) {
           const dr = document.createElement('tr');
           dr.className = 'detail-row';
           const confirmed = f.exploitProof.confirmed;
-          const pocOut = f.exploitProof.output ? ` — <span class="detail-mono" style="font-size:0.75rem">${escHtml(String(f.exploitProof.output).slice(0,140))}</span>` : '';
+          const pocOut = f.exploitProof.output
+            ? ` — <span class="detail-mono" style="font-size:0.75rem">${escHtml(String(f.exploitProof.output).slice(0, 140))}</span>`
+            : '';
           dr.innerHTML = `<td colspan="7">
             <span class="detail-label">PoC:</span>
             <span style="color:${confirmed ? '#f48771' : '#89d185'};font-weight:bold">
@@ -218,16 +339,16 @@
           tbody.appendChild(dr);
         }
 
-        // Challenge response (builder defence)
+        // Builder challenge response
         if (f.challengeResponse) {
-          const cr = f.challengeResponse;
-          const asmt = String(cr.assessment ?? 'unknown').replace(/[^a-z_]/g,'');
-          const dr = document.createElement('tr');
+          const cr   = f.challengeResponse;
+          const asmt = String(cr.assessment ?? 'unknown').replace(/[^a-z_]/g, '');
+          const dr   = document.createElement('tr');
           dr.className = 'challenge-row';
           dr.innerHTML = `<td colspan="7"><div class="challenge-box">
             <span class="challenge-assessment assessment-${asmt}">Builder: ${escHtml(cr.assessment ?? '')}</span><br>
             ${cr.explanation ? `<span>${escHtml(cr.explanation)}</span>` : ''}
-            ${cr.proposedFix ? `<div style="margin-top:4px"><span class="detail-label">Proposed fix:</span> <code style="font-size:0.78rem">${escHtml(String(cr.proposedFix).slice(0,240))}</code></div>` : ''}
+            ${cr.proposedFix ? `<div style="margin-top:4px"><span class="detail-label">Proposed fix:</span> <code style="font-size:0.78rem">${escHtml(String(cr.proposedFix).slice(0, 240))}</code></div>` : ''}
           </div></td>`;
           tbody.appendChild(dr);
         }
@@ -237,18 +358,27 @@
       root.appendChild(table);
     }
 
-    // ── Intermediate stepped display ────────────────────────────────────────
+    // ── Intermediate stepped view ─────────────────────────────────────────────
     function renderIntermediate(d) {
       const agentResults = d.agentResults || {};
       const agentOrder   = ['builder', 'factchecker', 'attacker', 'skeptic'];
       const ran          = agentOrder.filter(a => agentResults[a]);
 
-      const header = document.createElement('div');
-      header.innerHTML =
-        `<h1>Review In Progress</h1>` +
-        `<p class="summary-text">Agents completed so far: <strong>${ran.join(' → ')}</strong>. ` +
-        `Respond to the checkpoint prompt to continue.</p>`;
-      root.appendChild(header);
+      // Pipeline (pass null for agentStatuses — derive from agentResults)
+      root.appendChild(renderPipeline(agentResults, null));
+
+      // In-progress banner
+      const banner = document.createElement('div');
+      banner.className = 'in-progress-banner';
+      banner.innerHTML =
+        `<span class="spin">⟳</span>` +
+        `<strong>${ran.length} / 4</strong>&nbsp;agents complete — respond to the checkpoint prompt to continue.`;
+      root.appendChild(banner);
+
+      // Severity bar (aggregate across all partial findings)
+      const allFindings = Object.values(agentResults).flatMap(r => r?.findings || []);
+      const sevBar = renderSeverityBar(allFindings);
+      if (sevBar) root.appendChild(sevBar);
 
       let anyFindings = false;
       ran.forEach(agentName => {
@@ -257,7 +387,7 @@
         if (!findings.length) return;
         anyFindings = true;
 
-        const section = document.createElement('div');
+        const section  = document.createElement('div');
         section.style.cssText = 'margin-bottom:20px';
 
         const icon = { pass: '✅', warn: '⚠️', fail: '❌', error: '🔴', skipped: '—' }[result.status] ?? '❓';
@@ -300,10 +430,10 @@
 
     function escHtml(str) {
       return String(str)
-        .replace(/&/g,'&amp;')
-        .replace(/</g,'&lt;')
-        .replace(/>/g,'&gt;')
-        .replace(/"/g,'&quot;');
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
     }
   </script>
 </body>

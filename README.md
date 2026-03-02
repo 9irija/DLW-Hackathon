@@ -2,6 +2,8 @@
 
 Four specialized AI agents review your code with **human verification at every stage**. The orchestrator manages the full pipeline and synthesizes findings into a scored verdict: `approve / request-changes / block`.
 
+Built for the **DLW Hackathon — OpenAI Track** using the **App Server** integration pattern (OpenAI Responses API + Codex models served via an Express backend).
+
 ---
 
 ## Human-in-the-Loop Review Flow
@@ -79,11 +81,11 @@ The key feature of this extension is **three human checkpoints** built into the 
         ├─ runAgent('factchecker') ── Factchecker (gpt-5-codex) — TWO PASSES
         │    │    Pass 1 — Inline: compares every comment/docstring in the
         │    │             code against what the code actually does.
-        │    │             Findings tagged with line number.
+        │    │             Findings tagged with line, codeSnippet.
         │    │    Pass 2 — Docs (only when docs[] provided): compares each
         │    │             external document (README, API spec, design doc)
         │    │             against the actual implementation.
-        │    │             Findings tagged with docSource (filename).
+        │    │             Findings tagged with docSource, docSection, docPage.
         │    │
         ├─ runAgent('attacker') ── Attacker (gpt-5-codex + gpt-5.1-codex-mini + shadow/runner)
         │    │    Step 1 — Static scan (gpt-5-codex): finds vulnerabilities,
@@ -101,26 +103,28 @@ The key feature of this extension is **three human checkpoints** built into the 
         │         failure timeline, endpoint heatmap, latency distribution,
         │         user-journey failures. Parses import graph → flow diagram.
         │
-        └─ finalize() ── Normalise & deduplicate findings
-        │    All agent outputs mapped to a common shape.
-        │    Doc findings (line = null) are never deduplicated — all kept.
-        │    Same line + same type across agents → keep highest severity.
-        │    Sorted: severity desc → confidence desc.
-        │
-        ├─ PHASE 4 ── Builder challenge loop (critical findings only)
-        │    For each critical finding from factchecker or attacker,
-        │    builder.respondToChallenge() is called → assessment:
-        │    "acknowledged" | "disputed" | "requires_fix" + proposedFix.
-        │    Response is attached to the finding as challengeResponse.
-        │
-        └─ PHASE 5 ── Score + verdict + summary
-             Score: 100 − deductions (floor 0)
-               critical: −25  |  high: −15  |  medium: −5  |  low: −2
-               confirmed PoC:  −10 each (additional)
-             Verdict:
-               block           → any critical  OR  confirmed PoC exploit
-               request-changes → any high  OR  attacker/factchecker status = fail
-               approve         → medium/low only, all agents pass or warn
+        └─ finalize() ── Phases 3 → 5
+             │
+             ├─ Phase 3: Normalise & deduplicate findings
+             │    All agent outputs mapped to a common shape.
+             │    Doc findings (line = null) are never deduplicated — all kept.
+             │    Same line + same type across agents → keep highest severity.
+             │    Sorted: severity desc → confidence desc.
+             │
+             ├─ Phase 4: Builder challenge loop (critical findings only)
+             │    For each critical finding from factchecker or attacker,
+             │    builder.respondToChallenge() is called → assessment:
+             │    "acknowledged" | "disputed" | "requires_fix" + proposedFix.
+             │    Response is attached to the finding as challengeResponse.
+             │
+             └─ Phase 5: Score + verdict + summary
+                  Score: 100 − deductions (floor 0)
+                    critical: −25  |  high: −15  |  medium: −5  |  low: −2
+                    confirmed PoC:  −10 each (additional)
+                  Verdict:
+                    block           → any critical  OR  confirmed PoC exploit
+                    request-changes → any high  OR  attacker/factchecker status = fail
+                    approve         → medium/low only, all agents pass or warn
         │
         ▼
 [Response to Extension]
@@ -129,20 +133,48 @@ The key feature of this extension is **three human checkpoints** built into the 
         │
         ▼
 [Frontend Panels]
-  • Agent Status sidebar  — per-agent ✅/⚠️/❌ status chips with tooltips
+  • Status bar item       — bottom-left of VS Code window
+                              $(shield) Code Review   — idle
+                              $(sync~spin) Reviewing… — review in progress
+                              $(pass) APPROVE 85/100  — after approve verdict
+                              $(warning) CHANGES 65   — after request-changes verdict
+                              $(error) BLOCK 40/100   — after block verdict
+                            Click to open findings panel. Tooltip shows full summary.
+  • Agent Status sidebar  — per-agent ✅/⚠️/❌ status chips with summary tooltips
   • Verdict sidebar       — verdict icon, score, finding counts by severity,
                             builder challenge acknowledgement ratio, summary
-  • Findings webview      — unified table sorted by severity; per-finding extras:
-                              inline findings: line number, claim, reality
-                              doc findings:    docSource filename, claim, reality
+  • Findings webview      — pipeline strip at top (all 4 agents, ✅/⚠️/❌/⏳ per stage)
+                            severity bar (colour-coded horizontal bar, animated on load)
+                            unified findings table sorted by severity; per-finding extras:
+                              inline findings: line number, codeSnippet, claim, reality
+                              doc findings:    docSource, docSection, docPage, claim, reality
                               attacker:        CWE badge, attackVector, impact, PoC status
                               skeptic:         confidence score, category
                               all critical:    builder challengeResponse + proposedFix
-  • Charts webview        — severity radar by agent, skeptic evidence (4 charts:
+                            Intermediate display (between checkpoints):
+                              pipeline strip showing completed vs pending agents
+                              animated severity bar across partial findings
+                              spinning "Review in progress" banner + per-agent tables
+  • Charts webview        — animated score ring (SVG arc sweeps to final score, count-up number)
+                            severity radar by agent, skeptic evidence (4 charts:
                             failure timeline, endpoint heatmap, latency distribution,
                             user journey failures), system flow diagram,
                             per-finding confidence bars
 ```
+
+---
+
+## OpenAI Integration — App Server Pattern
+
+This project uses the **App Server** integration pattern from the OpenAI Codex SDK:
+
+- The VS Code extension is a **thin client** — it sends code to a local Express server and renders results.
+- The **Express backend** (`backend/index.js`) acts as the App Server — it calls OpenAI APIs on behalf of the client.
+- All LLM calls go through `backend/core/llm.js` which routes to:
+  - **Responses API** (`openai.responses.create`) when the model name contains `"codex"` (e.g. `gpt-5-codex`)
+  - **Chat Completions API** (`openai.chat.completions.create`) for all other model names
+
+This keeps the OpenAI API key server-side and lets you swap models without changing the extension.
 
 ---
 
@@ -155,7 +187,7 @@ RunChecks/
 │   │   ├── builder.js       # gpt-5-codex — code context provider + challenge responder
 │   │   ├── factchecker.js   # gpt-5-codex — inline comment check + external doc review
 │   │   ├── attacker.js      # gpt-5-codex + gpt-5.1-codex-mini + shadow — 3-step exploit pipeline
-│   │   ├── skeptic.js       # shadow/runner + flowParser — shadow execution + evidence
+│   │   ├── skeptic.js       # shadow/runner + flowParser — shadow execution + evidence (no LLM)
 │   │   └── orchestrator.js  # 5-phase pipeline controller → verdict + score
 │   ├── core/
 │   │   ├── openai.js        # Shared OpenAI client (reads OPENAI_API_KEY)
@@ -169,21 +201,23 @@ RunChecks/
 │   │   ├── runner.js        # child_process snippet executor (JS only, 5 s timeout)
 │   │   ├── testRunner.js    # npm test runner — parses Jest output (pass/fail/timing)
 │   │   └── flowParser.js    # regex-based require/import extractor → {nodes, edges}
-│   ├── index.js             # Express: POST /review, POST /decision, GET /health
+│   ├── index.js             # Express: POST /review/start, /review/next, /review/finalize, /review, /decision, GET /health
 │   ├── .env.example
 │   └── package.json
 │
 └── frontend/
     ├── src/
-    │   ├── extension.js          # activate(), 5 commands, auto-review on save
+    │   ├── extension.js          # activate(), 5 commands, stepped review flow, auto-review on save
     │   ├── panels/
     │   │   ├── agentStatus.js    # Sidebar tree: per-agent status chips
     │   │   ├── findings.js       # Webview panel: loads findings.html
     │   │   ├── verdict.js        # Sidebar tree: verdict, score, counts, challenge info
     │   │   └── skepticCharts.js  # Webview panel: loads charts.html
     │   └── webviews/
-    │       ├── findings.html     # Unified prioritizedFindings table + per-finding extras
+    │       ├── findings.html     # Findings table (final) + intermediate view between checkpoints
     │       └── charts.html       # Severity radar + skeptic evidence + flow diagram
+    ├── .vscode/
+    │   └── launch.json           # F5 → Extension Development Host
     └── package.json
 ```
 
@@ -194,7 +228,7 @@ RunChecks/
 | Agent | Default model | Role | Key output fields |
 |-------|----------------|------|-------------------|
 | **builder** | gpt-5-codex | Code context provider + challenge responder | `codeContext`, `respondToChallenge()` |
-| **factchecker** | gpt-5-codex | Inline comment accuracy + external doc accuracy | `claim`, `reality`, `docSource` |
+| **factchecker** | gpt-5-codex | Inline comment accuracy + external doc accuracy | `claim`, `reality`, `codeSnippet`, `docSource`, `docSection`, `docPage` |
 | **attacker** | gpt-5-codex (static), gpt-5.1-codex-mini (PoC) | Security vulnerability scan + PoC execution | `cwe`, `attackVector`, `impact`, `exploitProof.confirmed` |
 | **skeptic** | — (no LLM) | Shadow execution + test suite runner + flow graph | `evidence` (4 chart datasets), `flow`, `confidence` |
 | **orchestrator** | — | 5-phase pipeline controller | `verdict`, `score`, `prioritizedFindings`, `challengeResponses` |
@@ -226,9 +260,12 @@ npm start
 cd frontend
 # Open the frontend folder in VS Code (File → Open Folder → frontend)
 # Press F5 to launch the Extension Development Host
+# A new VS Code window opens — use the extension in that window
 ```
 
-In the new window, use the Code Review sidebar (shield icon) or commands (Ctrl+Shift+P → "Code Review: …"). The extension talks to `http://localhost:3001` by default; if the backend runs on another port, set **Settings → codeReview.backendUrl**.
+In the Extension Development Host window, use the Code Review sidebar (shield icon) or Ctrl+Shift+P → "Code Review: …".
+
+**Backend URL setting:** The extension defaults to `http://127.0.0.1:3001`. If the backend runs on another port, set **Settings → codeReview.backendUrl** (e.g. `http://127.0.0.1:3002`). Use `127.0.0.1` rather than `localhost` to avoid IPv4/IPv6 resolution issues on Windows.
 
 ---
 
@@ -236,9 +273,9 @@ In the new window, use the Code Review sidebar (shield icon) or commands (Ctrl+S
 
 | Command | How to trigger | What it does |
 |---|---|---|
-| `Code Review: Review Current File` | Ctrl+Shift+P / right-click | Sends full file through all 4 agents |
-| `Code Review: Review Selection` | Right-click (text selected) | Sends highlighted code only |
-| `Code Review: Review File with Docs` | Ctrl+Shift+P / right-click | Opens file picker → select `.md/.txt/.rst` docs → factchecker runs a second pass comparing those docs against the code |
+| `Code Review: Review Current File` | Ctrl+Shift+P / right-click | Stepped review with 3 human checkpoints — Builder → Factchecker → Attacker → optional Skeptic |
+| `Code Review: Review Selection` | Right-click (text selected) | Same stepped flow for highlighted code only |
+| `Code Review: Review File with Docs` | Ctrl+Shift+P / right-click | Stepped review; opens file picker to select `.md/.txt/.rst/.adoc/.html` docs → factchecker runs a second pass comparing those docs against the code |
 | `Code Review: Show Findings` | Ctrl+Shift+P | Opens/reveals findings webview |
 | `Code Review: Show Skeptic Charts` | Ctrl+Shift+P | Opens/reveals charts webview |
 
@@ -246,26 +283,32 @@ In the new window, use the Code Review sidebar (shield icon) or commands (Ctrl+S
 
 | Key | Default | Description |
 |---|---|---|
-| `codeReview.backendUrl`       | `http://localhost:3001` | Backend server URL |
-| `codeReview.autoReviewOnSave` | `false` | Auto-review on every file save (silent — no toast) |
+| `codeReview.backendUrl`       | `http://127.0.0.1:3001` | Backend server URL. Use `127.0.0.1` not `localhost` on Windows. |
+| `codeReview.autoReviewOnSave` | `false` | Auto-review on every file save — uses single-shot `/review` endpoint (no checkpoints, silent) |
 
 ---
 
 ## Factchecker — Two Passes
 
 ### Pass 1: Inline comments (always runs)
-Checks every comment, docstring, and JSDoc inside the code file against what the code actually does. Each finding includes the `line` number where the mismatch appears.
+Checks every comment, docstring, and JSDoc inside the code file against what the code actually does. Each finding includes:
+- `line` — line number where the mismatch appears
+- `codeSnippet` — the exact comment or code line that is wrong
 
 ### Pass 2: External documentation (only with "Review File with Docs")
-Accepts one or more external documents (README, API spec, design doc, changelog, etc.) and checks whether their claims match the actual implementation. Each finding includes `docSource` (the filename) so you know which document raised it.
+Accepts one or more external documents (README, API spec, design doc, changelog, etc.) and checks whether their claims match the actual implementation. Each finding includes:
+- `docSource` — filename of the document that raised the finding
+- `docSection` — section heading within the document (e.g. `"## Installation"`)
+- `docPage` — page number for paginated docs (PDF), or `null`
 
 ```
 Finding example (doc review):
-  Agent:   factchecker
-  Doc:     README.md
-  Claim:   "Returns results sorted by date descending"
-  Reality: "Results are returned in insertion order, no sorting applied"
-  Suggest: "Either sort the results before returning or update the README"
+  Agent:      factchecker
+  Doc:        README.md
+  Section:    ## Sorting
+  Claim:      "Returns results sorted by date descending"
+  Reality:    "Results are returned in insertion order, no sorting applied"
+  Suggest:    "Either sort the results before returning or update the README"
 ```
 
 ---
@@ -275,7 +318,7 @@ Finding example (doc review):
 | Endpoint | Method | Body | Purpose |
 |---|---|---|---|
 | `/review/start`    | POST | `{ code, filePath, language, workspaceRoot?, docs? }` | Step 1 — Run Builder, open session |
-| `/review/next`     | POST | `{ sessionId, agent }` | Step 2/3 — Run factchecker, attacker, or skeptic |
+| `/review/next`     | POST | `{ sessionId, agent }` | Step 2/3/4 — Run factchecker, attacker, or skeptic |
 | `/review/finalize` | POST | `{ sessionId }` | Final — Orchestrate all collected results → verdict |
 | `/review`          | POST | see below | Single-shot full pipeline (auto-save, backwards compat) |
 | `/decision`        | POST | `{ logId, decision }` | Record human accept/reject/defer |
@@ -319,7 +362,8 @@ Finding example (doc review):
       "claim":       "Returns results sorted by date descending",
       "reality":     "Results returned in insertion order",
       "suggestion":  "Sort results or update README",
-      "docSource":   "README.md"
+      "docSource":   "README.md",
+      "docSection":  "## Sorting"
     },
     {
       "source":      "attacker",

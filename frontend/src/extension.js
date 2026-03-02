@@ -11,6 +11,18 @@ const { SkepticChartsPanel } = require('./panels/skepticCharts');
 /** @type {object|null} */
 let lastResult = null;
 
+/** @type {vscode.StatusBarItem|null} */
+let statusBarItem = null;
+
+/** Update status bar to reflect a finished review verdict. */
+function setStatusBarResult(result) {
+  if (!statusBarItem || !result) return;
+  const icon  = { approve: '$(pass)', 'request-changes': '$(warning)', block: '$(error)' }[result.verdict] ?? '$(shield)';
+  const label = { approve: 'APPROVE', 'request-changes': 'CHANGES', block: 'BLOCK' }[result.verdict] ?? 'DONE';
+  statusBarItem.text    = `${icon} ${label} ${result.score ?? '—'}/100`;
+  statusBarItem.tooltip = result.summary ?? 'Click to show findings';
+}
+
 // ─── Backend call ─────────────────────────────────────────────────────────────
 
 function post(backendUrl, path, body) {
@@ -58,6 +70,12 @@ async function runReviewStepped(context, code, filePath, language, docs = []) {
   const backendUrl    = cfg.get('backendUrl') || 'http://127.0.0.1:3001';
   const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
 
+  // Show spinning indicator in status bar for the whole review
+  if (statusBarItem) {
+    statusBarItem.text    = '$(sync~spin) Reviewing…';
+    statusBarItem.tooltip = 'Multi-agent code review in progress';
+  }
+
   // ── Step 1: Builder ─────────────────────────────────────────────────────────
   let startResult;
   await vscode.window.withProgress(
@@ -82,6 +100,7 @@ async function runReviewStepped(context, code, filePath, language, docs = []) {
   if (choice1 !== 'Approve & Continue') {
     const partial = await post(backendUrl, '/review/finalize', { sessionId });
     lastResult = partial;
+    setStatusBarResult(partial);
     FindingsPanel.show(context, partial);
     VerdictPanel.refresh(context, partial);
     return vscode.window.showWarningMessage('Review stopped after Builder. Partial verdict generated.');
@@ -115,6 +134,7 @@ async function runReviewStepped(context, code, filePath, language, docs = []) {
   if (choice2 !== 'Approve & Continue') {
     const partial = await post(backendUrl, '/review/finalize', { sessionId });
     lastResult = partial;
+    setStatusBarResult(partial);
     FindingsPanel.show(context, partial);
     SkepticChartsPanel.show(context, partial);
     AgentStatusPanel.refresh(context, partial);
@@ -163,6 +183,7 @@ async function runReviewStepped(context, code, filePath, language, docs = []) {
   // ── Finalize: orchestrate all collected results ──────────────────────────────
   const finalResult = await post(backendUrl, '/review/finalize', { sessionId });
   lastResult = finalResult;
+  setStatusBarResult(finalResult);
   FindingsPanel.show(context, finalResult);
   SkepticChartsPanel.show(context, finalResult);
   AgentStatusPanel.refresh(context, finalResult);
@@ -180,6 +201,14 @@ async function runReviewStepped(context, code, filePath, language, docs = []) {
 function activate(context) {
   AgentStatusPanel.register(context);
   VerdictPanel.register(context);
+
+  // ── Status bar item (bottom-left — shows verdict after each review) ────────
+  statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
+  statusBarItem.command = 'codeReview.showFindings';
+  statusBarItem.text    = '$(shield) Code Review';
+  statusBarItem.tooltip = 'Run a review: Ctrl+Shift+P → Code Review: Review Current File';
+  statusBarItem.show();
+  context.subscriptions.push(statusBarItem);
 
   // ── Review current file (stepped) ────────────────────────────────────────
   context.subscriptions.push(
@@ -279,6 +308,7 @@ function activate(context) {
       if (!cfg.get('autoReviewOnSave')) return;
       const backendUrl    = cfg.get('backendUrl') || 'http://127.0.0.1:3001';
       const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+      if (statusBarItem) { statusBarItem.text = '$(sync~spin) Auto-reviewing…'; }
       try {
         const body = {
           code:          document.getText(),
@@ -287,10 +317,13 @@ function activate(context) {
           workspaceRoot,
         };
         lastResult = await post(backendUrl, '/review', body);
+        setStatusBarResult(lastResult);
         FindingsPanel.show(context, lastResult);
         AgentStatusPanel.refresh(context, lastResult);
         VerdictPanel.refresh(context, lastResult);
-      } catch { /* silent on auto-save */ }
+      } catch {
+        if (statusBarItem) { statusBarItem.text = '$(shield) Code Review'; }
+      }
     })
   );
 
