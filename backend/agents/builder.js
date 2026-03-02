@@ -48,6 +48,8 @@ surface contradictions or violations in your output, you will be asked to respon
 
 Always respond with a single valid JSON object matching this schema exactly.
 Do not include markdown fences or explanation outside the JSON.
+Be concise: keep intent under 150 chars, each array entry under 80 chars.
+OMIT the "rawCode" field entirely — it will be injected automatically.
 
 {
   "submissionId":   "<uuid>",
@@ -59,7 +61,6 @@ Do not include markdown fences or explanation outside the JSON.
   "sideEffects":    ["<string>"],
   "dataFlows":      [{ "from": "<string>", "to": "<string>", "dataType": "<string>" }],
   "potentialRisks": ["<string>"],
-  "rawCode":        "<string>",
   "lineRange":      { "file": "<string>", "start": <number>, "end": <number> }
 }
 
@@ -77,6 +78,46 @@ traces back to your analysis, you will receive a CHALLENGE message. Respond with
   }
 }
 `;
+
+/**
+ * Attempt to parse potentially truncated/malformed JSON from the LLM.
+ * Tries progressively more aggressive repair strategies before giving up.
+ * @param {string} raw
+ * @returns {object|null}
+ */
+function repairTruncatedJson(raw) {
+  // 1. Strip markdown fences if present
+  raw = raw.replace(/^```json?\s*/i, '').replace(/```\s*$/, '').trim();
+
+  // 2. Straightforward parse
+  try { return JSON.parse(raw); } catch (_) {}
+
+  // 3. Extract outermost { ... }
+  const first = raw.indexOf('{');
+  const last  = raw.lastIndexOf('}');
+  if (first !== -1 && last > first) {
+    try { return JSON.parse(raw.slice(first, last + 1)); } catch (_) {}
+  }
+
+  // 4. Response was truncated mid-JSON — close all open structures
+  let snippet = first !== -1 ? raw.slice(first) : raw;
+
+  // Close any open string (odd number of unescaped quotes)
+  const quoteCount = (snippet.match(/(?<!\\)"/g) || []).length;
+  if (quoteCount % 2 !== 0) snippet += '"';
+
+  // Close open arrays/objects by walking the bracket stack
+  const stack = [];
+  for (const ch of snippet) {
+    if (ch === '{' || ch === '[') stack.push(ch === '{' ? '}' : ']');
+    else if ((ch === '}' || ch === ']') && stack.length) stack.pop();
+  }
+  snippet += stack.reverse().join('');
+
+  try { return JSON.parse(snippet); } catch (_) {}
+
+  return null; // all strategies exhausted
+}
 
 /**
  * Analyse code and return CodeContext.
@@ -97,25 +138,40 @@ ${code}
 \`\`\`
 
 Analyse this code and return the CodeContext JSON object.
-Populate the lineRange with the file and line numbers provided above.
 Populate submissionId with: ${submissionId}
+Populate lineRange with: { "file": "${filePath}", "start": ${lineStart}, "end": ${lineEnd} }
+
+IMPORTANT: Be concise — keep all string values short (intent ≤ 150 chars, each array
+entry ≤ 80 chars). Omit the "rawCode" field entirely; it will be injected later.
+Output ONLY raw JSON, no markdown fences, no explanation.
 `;
 
-  const raw = await complete({
-    model: BUILDER_MODEL,
-    system: BUILDER_SYSTEM_PROMPT,
-    user: userMessage,
-    temperature: 0.1,
-    max_tokens: 2048,
-    jsonMode: true,
-  });
+  let raw;
   let codeContext;
-  try {
-    codeContext = JSON.parse(raw);
-  } catch (err) {
-    throw new Error(`Builder Agent: Failed to parse CodeContext JSON.\n${raw}`);
+  const MAX_ATTEMPTS = 2;
+
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    raw = await complete({
+      model: BUILDER_MODEL,
+      system: BUILDER_SYSTEM_PROMPT,
+      user: attempt === 1
+        ? userMessage
+        : userMessage + '\n\nNOTE: Your previous response was truncated or invalid JSON. Reply with compact JSON only — no prose, no markdown.',
+      temperature: 0.1,
+      max_tokens: 8192,
+      jsonMode: true,
+    });
+
+    codeContext = repairTruncatedJson(raw);
+    if (codeContext) break;
+
+    if (attempt === MAX_ATTEMPTS) {
+      throw new Error(`Builder Agent: Failed to parse CodeContext JSON after ${MAX_ATTEMPTS} attempts.\nRaw response:\n${raw}`);
+    }
+    // otherwise loop to retry
   }
 
+  // Always inject these server-side — never trust the model to reproduce them correctly
   codeContext.submissionId = submissionId;
   codeContext.rawCode = code;
   codeContext.lineRange = { file: filePath, start: lineStart, end: lineEnd };
@@ -130,10 +186,13 @@ Populate submissionId with: ${submissionId}
  * @returns {Promise<object>} challengeResponse
  */
 async function respondToChallenge(codeContext, challenge) {
+  // Omit rawCode from the context sent back to the model to avoid token bloat
+  const { rawCode: _omit, ...contextForPrompt } = codeContext;
+
   const challengeMessage = `
 You previously produced the following CodeContext for submission ${codeContext.submissionId}:
 
-${JSON.stringify(codeContext, null, 2)}
+${JSON.stringify(contextForPrompt, null, 2)}
 
 The ${challenge.agentName} has now flagged the following issue:
 
@@ -142,6 +201,7 @@ SEVERITY  : ${challenge.severity || 'unspecified'}
 
 This finding may trace back to your original analysis.
 Respond with the challengeResponse JSON object as specified in your instructions.
+Output ONLY raw JSON, no markdown fences, no explanation.
 `;
 
   const raw = await complete({
@@ -152,11 +212,10 @@ Respond with the challengeResponse JSON object as specified in your instructions
     max_tokens: 2048,
     jsonMode: true,
   });
-  let challengeResponse;
-  try {
-    challengeResponse = JSON.parse(raw);
-  } catch (err) {
-    throw new Error(`Builder Agent: Failed to parse challengeResponse JSON.\n${raw}`);
+
+  const challengeResponse = repairTruncatedJson(raw);
+  if (!challengeResponse) {
+    throw new Error(`Builder Agent: Failed to parse challengeResponse JSON.\nRaw response:\n${raw}`);
   }
   return challengeResponse;
 }
@@ -199,7 +258,13 @@ async function run(payload) {
     return {
       agent: 'builder',
       status: 'fail',
-      findings: [{ line: undefined, category: 'builder-error', description: err.message, severity: 'high', suggestion: 'Check code and retry.' }],
+      findings: [{
+        line: undefined,
+        category: 'builder-error',
+        description: err.message,
+        severity: 'high',
+        suggestion: 'Check code and retry.',
+      }],
       summary: `Builder analysis failed: ${err.message}`,
       codeContext: null,
     };
