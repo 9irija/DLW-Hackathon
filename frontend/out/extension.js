@@ -665,8 +665,8 @@ class SetupPanel {
 
   startBtn.onclick = () => {
     vscode.postMessage({ type: 'startSession' });
-    // Lock the setup panel for this session: hide actions and leave only the status message
-    if (actionsEl) actionsEl.style.display = 'none';
+    // Prevent double-start for this session, but keep upload available
+    startBtn.disabled = true;
     statusEl.textContent = 'Starting session…';
     statusEl.className   = '';
   };
@@ -689,11 +689,11 @@ class SetupPanel {
       '<button class="doc-delete" data-name="' + escHtml(d.filename) + '" title="Remove document">✖</button>' +
       '</div>'
     ).join('');
-    // Wire delete buttons
+    // Wire delete buttons (plain JS, no TypeScript casts)
     list.querySelectorAll('.doc-delete').forEach(btn => {
       btn.addEventListener('click', () => {
-        const name = (btn as HTMLElement).getAttribute('data-name');
-        if (!name) return;
+        const name = btn.getAttribute('data-name');
+        if (!name) { return; }
         vscode.postMessage({ type: 'deleteDoc', name });
       });
     });
