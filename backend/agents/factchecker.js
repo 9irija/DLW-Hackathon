@@ -1,15 +1,17 @@
 /**
  * factchecker — two-pass accuracy checker:
  *
+ * Flow: code is processed by parser first (for segments), then each segment
+ * is checked; docs are read via docreader (metadata + extractText), then
+ * each doc/section is compared against code. Orchestrator runs builder first,
+ * then factchecker receives enrichedPayload (code, filePath, language, docs).
+ *
  *   Pass 1 — Inline comments (always runs)
- *     Compares every comment, docstring, and JSDoc inside the code file
- *     against what the code actually does.
+ *     Parser runs on code → segments; each segment is compared (comment vs implementation).
  *
  *   Pass 2 — External documentation (runs when payload.docs is provided)
- *     Compares each external document (README, API docs, specs, etc.)
- *     against the actual code implementation. Findings are tagged with
- *     docSource, docSection, and docPage so the UI can show which part
- *     of which document raised the issue.
+ *     Docreader runs on payload.docs → metadata/sections; extractText gives plain text;
+ *     each doc/section is compared against the actual code.
  *
  * Output shape:
  * {
@@ -39,7 +41,24 @@ const docreader = require('./docreader');
 // Default Codex (Responses API). Override with FACTCHECKER_MODEL in .env to use Chat Completions (e.g. gpt-4o-mini).
 const FACTCHECKER_MODEL = process.env.FACTCHECKER_MODEL || process.env.CODEX_MODEL || 'gpt-5-codex';
 
+// Max concurrent LLM calls for doc-section checks (reduces wait after docreader).
+const DOC_SECTION_CONCURRENCY = Math.min(Number(process.env.FACTCHECKER_DOC_CONCURRENCY) || 4, 8);
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+/** Run async tasks with a concurrency limit. */
+async function runWithConcurrency(tasks, limit) {
+  const results = [];
+  const executing = new Set();
+  for (let i = 0; i < tasks.length; i++) {
+    const p = Promise.resolve().then(() => tasks[i]());
+    executing.add(p);
+    const done = p.finally(() => { executing.delete(p); });
+    results.push(done);
+    if (executing.size >= limit) await Promise.race(executing);
+  }
+  return Promise.all(results);
+}
 
 /**
  * Given the full source code string and a line number, extracts a small window
@@ -214,7 +233,12 @@ async function checkInlineComments(code, filePath, language, allowChunk = true) 
     return { findings, summary };
   };
 
-  for (const seg of segments) {
+  const totalSegments = segments.length;
+  for (let i = 0; i < segments.length; i++) {
+    const seg = segments[i];
+    if (totalSegments > 1) {
+      console.warn(`[factchecker] Pass 1 (inline): segment ${i + 1}/${totalSegments}...`);
+    }
     try {
       const { findings, summary } = await performRequest(seg.snippet);
       findings.forEach(f => {
@@ -270,6 +294,7 @@ async function checkDocAgainstCode(code, filePath, doc, meta, plainText) {
   }
 
   const aggregated = { findings: [], summary: '' };
+  const totalSections = snippets.length;
 
   let codeSnippet = code;
   if (code.length > 4000) {
@@ -277,7 +302,14 @@ async function checkDocAgainstCode(code, filePath, doc, meta, plainText) {
     console.warn(`[factchecker] trimming code to ${codeSnippet.length} chars for doc check (${doc.name})`);
   }
 
-  for (const snip of snippets) {
+  if (totalSections > 1) {
+    console.warn(`[factchecker] Pass 2 (doc vs code): ${doc.name}, ${totalSections} sections (concurrency ${DOC_SECTION_CONCURRENCY})...`);
+  }
+
+  const sectionTasks = snippets.map((snip, idx) => async () => {
+    if (totalSections > 1 && (idx + 1) % 5 === 0 || idx === totalSections - 1) {
+      console.warn(`[factchecker] Pass 2: section ${idx + 1}/${totalSections} (${snip.title.slice(0, 40)}...)`);
+    }
     let docText = snip.text;
     if (docText.length > 6000) docText = docText.slice(0, 6000) + '\n...<TRUNCATED>...';
 
@@ -296,7 +328,7 @@ async function checkDocAgainstCode(code, filePath, doc, meta, plainText) {
       parsed = repairTruncatedJson(raw);
     } catch (err) {
       console.error(`[factchecker] doc parser error (${doc.name} section ${snip.title}): ${err.message}. Raw response:\n${raw}`);
-      continue;
+      return { findings: [], summary: '' };
     }
 
     const findings = Array.isArray(parsed.findings)
@@ -315,11 +347,15 @@ async function checkDocAgainstCode(code, filePath, doc, meta, plainText) {
         }))
       : [];
 
+    const summary = parsed.summary ? `[${snip.title}] ${parsed.summary}` : '';
+    return { findings, summary };
+  });
+
+  const sectionResults = await runWithConcurrency(sectionTasks, DOC_SECTION_CONCURRENCY);
+  for (const { findings, summary } of sectionResults) {
     aggregated.findings.push(...findings);
-    if (parsed.summary) {
-      aggregated.summary += aggregated.summary
-        ? ` | [${snip.title}] ${parsed.summary}`
-        : `[${snip.title}] ${parsed.summary}`;
+    if (summary) {
+      aggregated.summary += aggregated.summary ? ` | ${summary}` : summary;
     }
   }
 
@@ -418,10 +454,12 @@ async function run(payload) {
   const metaMap = {};
   if (docs.length) {
     try {
+      console.warn('[factchecker] Running docreader for', docs.length, 'doc(s)...');
       const dr = await docreader.run({ docs });
       if (dr?.docs) {
         dr.docs.forEach(d => { if (d?.name) metaMap[d.name] = d; });
       }
+      console.warn('[factchecker] Docreader done. Starting Pass 1 (inline) then Pass 2 (doc vs code).');
     } catch (err) {
       console.error('[factchecker] docreader error:', err.message);
     }
@@ -432,6 +470,7 @@ async function run(payload) {
   let inlineError = null;
 
   // ── Pass 1: Inline comments ───────────────────────────────────────────────
+  console.warn('[factchecker] Pass 1: inline comments vs code...');
   try {
     const { findings, summary } = await checkInlineComments(code, filePath, language);
     allFindings.push(...findings);
@@ -446,6 +485,9 @@ async function run(payload) {
   }
 
   // ── Pass 2: External documents ────────────────────────────────────────────
+  if (docs.length) {
+    console.warn(`[factchecker] Pass 2: ${docs.length} doc(s) vs code (requirements + sections)...`);
+  }
   for (const doc of docs) {
     if (!doc?.content) continue;
     const meta = metaMap[doc.name] || null;
@@ -460,6 +502,7 @@ async function run(payload) {
 
     // ── Pass 2a: Explicit requirement verification (LLM-based) ──────────────
     try {
+      console.warn(`[factchecker] Pass 2a: verifying explicit requirements (${doc.name})...`);
       const { findings, summary } = await verifyExplicitRules(plainText, code, filePath, doc);
       allFindings.push(...findings);
       if (summary) summaryParts.push(`[${doc.name}] requirements: ${summary}`);

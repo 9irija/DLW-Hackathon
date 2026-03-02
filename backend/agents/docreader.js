@@ -128,8 +128,8 @@ async function extractText(doc) {
     }
   }
 
-  // plain text / markdown / anything else
-  const text = String(doc.content || '');
+  // plain text / markdown / anything else (decode buffer if we have one, e.g. base64)
+  const text = buf ? buf.toString('utf8') : String(doc.content || '');
   return { text: cleanText(text), pageCount: null };
 }
 
