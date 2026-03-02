@@ -88,6 +88,56 @@ function sliceByLines(text, startLine, endLine) {
   ).join('\n');
 }
 
+/**
+ * Build a line-numbered version of `code` suitable for LLM prompts, staying
+ * within `maxChars`. Unlike trimCodeForPrompt + sequential numbering, this
+ * preserves ABSOLUTE line numbers in both the head and tail portions so that
+ * the LLM's reported line numbers can be used directly with extractSnippet().
+ *
+ * Format when trimmed:
+ *   1: first line
+ *   2: second line
+ *   ...
+ *   N: last head line
+ *   ... <lines N+1 to M omitted> ...
+ *   M+1: first tail line
+ *   ...
+ */
+function buildNumberedCode(code, maxChars) {
+  const allLines = code.split('\n');
+  // No trimming needed
+  if (!maxChars || code.length <= maxChars) {
+    return allLines.map((l, i) => `${i + 1}: ${l}`).join('\n');
+  }
+  const half = Math.floor(maxChars / 2);
+  // Build head: accumulate lines from the top
+  const headLines = [];
+  let used = 0;
+  for (let i = 0; i < allLines.length; i++) {
+    const entry = `${i + 1}: ${allLines[i]}`;
+    if (used + entry.length + 1 > half) break;
+    headLines.push(entry);
+    used += entry.length + 1;
+  }
+  // Build tail: accumulate lines from the bottom
+  const tailLines = [];
+  used = 0;
+  for (let i = allLines.length - 1; i > headLines.length - 1; i--) {
+    const entry = `${i + 1}: ${allLines[i]}`;
+    if (used + entry.length + 1 > half) break;
+    tailLines.unshift(entry);
+    used += entry.length + 1;
+  }
+  const omitStart = headLines.length + 1;
+  const omitEnd   = allLines.length - tailLines.length;
+  const parts = [...headLines];
+  if (omitStart <= omitEnd) {
+    parts.push(`... <lines ${omitStart}–${omitEnd} omitted> ...`);
+  }
+  parts.push(...tailLines);
+  return parts.join('\n');
+}
+
 // ─── Prompts ──────────────────────────────────────────────────────────────────
 
 const INLINE_SYSTEM = `You are a fact-checker for source code. Compare every comment, docstring, JSDoc, and inline documentation in the code with what the code actually does.
@@ -189,17 +239,14 @@ async function checkInlineComments(code, filePath, language, allowChunk = true) 
   const summaries = [];
 
   const performRequest = async (src) => {
-    const promptCode = require('../core/parser').trimCodeForPrompt(src, 12000);
-    if (promptCode !== src) {
+    if (src.length > 12000) {
       console.warn(
-        `[factchecker] trimming code from ${src.length} to ${promptCode.length} chars for inline check`
+        `[factchecker] code segment ${src.length} chars > 12000 — using head+tail excerpt for inline check`
       );
     }
-    // Number each line (1-based within segment) so the LLM reports accurate line numbers.
-    // The seg.lineStart-1 offset is applied by the caller after performRequest returns.
-    const numberedCode = promptCode.split('\n')
-      .map((l, i) => `${i + 1}: ${l}`)
-      .join('\n');
+    // buildNumberedCode preserves absolute (segment-relative) line numbers even when
+    // the segment is trimmed, so extractSnippet(src, line) stays correct.
+    const numberedCode = buildNumberedCode(src, 12000);
     const userContent = `File: ${filePath}\nLanguage: ${language}\n\nCode (each line prefixed with its line number):\n\`\`\`\n${numberedCode}\n\`\`\`\n\nList every place where a comment or docstring does not match the implementation. Output JSON only.`;
 
     const raw = (await complete({
@@ -304,13 +351,14 @@ async function checkDocAgainstCode(code, filePath, doc, meta, plainText) {
   const aggregated = { findings: [], summary: '' };
   const totalSections = snippets.length;
 
-  let codeForLLM = code;
-  if (code.length > 4000) {
-    codeForLLM = require('../core/parser').trimCodeForPrompt(code, 4000);
-    console.warn(`[factchecker] trimming code to ${codeForLLM.length} chars for doc check (${doc.name})`);
+  // Build line-numbered code with ABSOLUTE line numbers so extractSnippet()
+  // can use the LLM-reported line number directly against the full file.
+  // 8000 char budget: half head + half tail ensures both early and late
+  // functions are visible even in large files.
+  const numberedCodeForDoc = buildNumberedCode(code, 8000);
+  if (code.length > 8000) {
+    console.warn(`[factchecker] code > 8000 chars for doc check (${doc.name}) — using head+tail excerpt`);
   }
-  // Number each line so the LLM can report accurate source line numbers
-  const numberedCodeForDoc = codeForLLM.split('\n').map((l, i) => `${i + 1}: ${l}`).join('\n');
 
   if (totalSections > 1) {
     console.warn(`[factchecker] Pass 2 (doc vs code): ${doc.name}, ${totalSections} sections (concurrency ${DOC_SECTION_CONCURRENCY})...`);
@@ -395,8 +443,8 @@ async function verifyExplicitRules(plainText, code, filePath, doc) {
 
   if (!explicitRules.length) return { findings: [], summary: '' };
 
-  const trimmedCode = require('../core/parser').trimCodeForPrompt(code, 6000);
-  const numberedCode = trimmedCode.split('\n').map((l, i) => `${i + 1}: ${l}`).join('\n');
+  // Use absolute line numbers so LLM-reported lines map directly to the real file.
+  const numberedCode = buildNumberedCode(code, 8000);
 
   const userContent = `You are verifying whether source code satisfies a list of requirements extracted from a document.
 
@@ -542,29 +590,13 @@ async function run(payload) {
     // ── Pass 2b: Full document vs code check (per section) ───────────────────
     const normalisedDoc = { name: doc.name, content: plainText };
 
-    let docError = null;
     try {
       const { findings, summary } = await checkDocAgainstCode(code, filePath, normalisedDoc, meta, plainText);
       allFindings.push(...findings);
       if (summary) summaryParts.push(`[${doc.name}] ${summary}`);
     } catch (err) {
-      docError = err.message;
       console.error(`[factchecker] doc check error (${doc.name}):`, err.message);
-      // retry with trimmed code
-      try {
-        console.warn(`[factchecker] retrying doc check (${doc.name}) with trimmed code`);
-        const trimmed = require('../core/parser').trimCodeForPrompt(code, 4000);
-        const { findings, summary } = await checkDocAgainstCode(trimmed, filePath, normalisedDoc, meta, plainText);
-        allFindings.push(...findings);
-        if (summary) summaryParts.push(`[${doc.name}] ${summary} (partial)`);
-        docError = null;
-      } catch (err2) {
-        console.error(`[factchecker] doc retry failed (${doc.name}):`, err2.message);
-      }
-    }
-
-    if (docError) {
-      summaryParts.push(`[${doc.name}] document check failed: ${docError}`);
+      summaryParts.push(`[${doc.name}] document check failed: ${err.message}`);
     }
   }
 
