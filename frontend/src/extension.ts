@@ -2,17 +2,23 @@ import * as vscode from 'vscode';
 import { AgentStatusPanel } from './panels/AgentStatusPanel';
 import { SetupPanel }       from './panels/SetupPanel';
 import { FindingsPanel }    from './panels/FindingsPanel';
-import { SkepticPanel }     from './panels/SkepticPanel';
 import * as client          from './utils/backendClient';
 import { clearHighlights }  from './utils/highlighter';
-import type { AgentResult, AgentFinding, SkepticData } from './types/agents';
+import type { AgentResult, AgentFinding, SessionStatus } from './types/agents';
 
 // ─── Module state ─────────────────────────────────────────────────────────────
 
 let statusBarItem:    vscode.StatusBarItem;
+let agentStatusPanel: AgentStatusPanel | undefined;
 let currentSessionId: string | undefined;
 let currentFilePath:  string | undefined;
 let _context:         vscode.ExtensionContext;
+
+// Per-agent live state fed to the sidebar panel
+const _agentStates: Record<string, 'idle'|'running'|'passed'|'failed'> = {
+  orchestrator: 'idle', parser: 'idle', docreader: 'idle', reasoner: 'idle',
+  factchecker:  'idle', attacker: 'idle', skeptic: 'idle',
+};
 
 // ─── Activate ─────────────────────────────────────────────────────────────────
 
@@ -28,13 +34,13 @@ export function activate(context: vscode.ExtensionContext): void {
 
   // ── Sidebar WebviewView provider ────────────────────────────────────────────
   const agentStatusProvider = new AgentStatusPanel(context.extensionUri);
+  agentStatusPanel = agentStatusProvider;
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(AgentStatusPanel.viewType, agentStatusProvider)
   );
 
-  // ── Wire panel decision callbacks ────────────────────────────────────────────
+  // ── Wire panel decision callback ─────────────────────────────────────────────
   FindingsPanel.onDecision = _handleFindingsDecision;
-  SkepticPanel.onDecision  = _handleSkepticDecision;
 
   // ── Commands ────────────────────────────────────────────────────────────────
   context.subscriptions.push(
@@ -64,6 +70,23 @@ export function deactivate(): void {
   clearHighlights();
 }
 
+// ─── Agent status helpers ─────────────────────────────────────────────────────
+
+function _pushStatus(currentStage: string, awaitingDecision: boolean): void {
+  if (!agentStatusPanel) { return; }
+  const sessionStatus: SessionStatus = {
+    currentStage,
+    awaitingDecision,
+    agents: Object.entries(_agentStates).map(([name, status]) => ({ name, status })),
+  };
+  agentStatusPanel.updateStatus(sessionStatus);
+}
+
+function _resetAllAgentStates(): void {
+  (Object.keys(_agentStates) as string[]).forEach(k => { _agentStates[k] = 'idle'; });
+  _pushStatus('', false);
+}
+
 // ─── Review flow ──────────────────────────────────────────────────────────────
 
 async function _startReview(): Promise<void> {
@@ -83,7 +106,16 @@ async function _startReview(): Promise<void> {
   currentSessionId = undefined;
   currentFilePath  = filePath;
 
+  // Reset and show pipeline immediately
+  _resetAllAgentStates();
   vscode.commands.executeCommand('runchecks.showStatus');
+
+  // Mark pre-processing agents as running
+  _agentStates['orchestrator'] = 'running';
+  _agentStates['parser']       = 'running';
+  _agentStates['reasoner']     = 'running';
+  _pushStatus('parser', false);
+
   statusBarItem.text = '$(sync~spin) RunChecks — Pre-processing…';
   statusBarItem.show();
 
@@ -95,6 +127,11 @@ async function _startReview(): Promise<void> {
     );
 
     currentSessionId = startResult.sessionId;
+
+    _agentStates['parser']   = 'passed';
+    _agentStates['reasoner'] = 'passed';
+    _pushStatus('', true);
+
     statusBarItem.text = '$(shield) RunChecks — Pre-processing complete';
 
     const pick = await vscode.window.showInformationMessage(
@@ -104,6 +141,7 @@ async function _startReview(): Promise<void> {
     );
 
     if (pick !== 'Run Fact Checker') {
+      _resetAllAgentStates();
       _resetStatusBar();
       return;
     }
@@ -111,6 +149,9 @@ async function _startReview(): Promise<void> {
     await _runAgent('factchecker');
 
   } catch (err) {
+    _agentStates['parser']   = 'failed';
+    _agentStates['reasoner'] = 'failed';
+    _pushStatus('', false);
     _resetStatusBar();
     vscode.window.showErrorMessage(`RunChecks: Failed to start — ${(err as Error).message}`);
   }
@@ -119,6 +160,8 @@ async function _startReview(): Promise<void> {
 async function _runAgent(agent: string): Promise<void> {
   if (!currentSessionId) { return; }
 
+  _agentStates[agent] = 'running';
+  _pushStatus(agent, false);
   statusBarItem.text = `$(sync~spin) RunChecks — Running ${agent}…`;
 
   try {
@@ -128,11 +171,17 @@ async function _runAgent(agent: string): Promise<void> {
       async () => { nextResult = await client.runNextAgent(currentSessionId!, agent); }
     );
 
+    const passed = nextResult.agentResult?.['status'] === 'pass';
+    _agentStates[agent] = passed ? 'passed' : 'failed';
+    _pushStatus(agent, true);
+
     const adapted = _adaptAgentResult(nextResult.agentResult, agent);
     FindingsPanel.show(_context.extensionUri, adapted);
     statusBarItem.text = `$(shield) RunChecks — ${agent} complete`;
 
   } catch (err) {
+    _agentStates[agent] = 'failed';
+    _pushStatus(agent, false);
     _resetStatusBar();
     vscode.window.showErrorMessage(`RunChecks: ${agent} failed — ${(err as Error).message}`);
   }
@@ -141,6 +190,8 @@ async function _runAgent(agent: string): Promise<void> {
 async function _runSkeptic(): Promise<void> {
   if (!currentSessionId) { return; }
 
+  _agentStates['skeptic'] = 'running';
+  _pushStatus('skeptic', false);
   statusBarItem.text = '$(sync~spin) RunChecks — Running Skeptic…';
 
   try {
@@ -150,11 +201,17 @@ async function _runSkeptic(): Promise<void> {
       async () => { nextResult = await client.runNextAgent(currentSessionId!, 'skeptic'); }
     );
 
-    const skepticData = nextResult.agentResult as unknown as SkepticData;
-    SkepticPanel.show(_context.extensionUri, skepticData);
+    const passed = nextResult.agentResult?.['status'] === 'pass';
+    _agentStates['skeptic'] = passed ? 'passed' : 'failed';
+    _pushStatus('skeptic', true);
+
+    // Show skeptic results in the same FindingsPanel tab (no new tab)
+    FindingsPanel.showSkeptic(_context.extensionUri, nextResult.agentResult);
     statusBarItem.text = '$(shield) RunChecks — Skeptic complete';
 
   } catch (err) {
+    _agentStates['skeptic'] = 'failed';
+    _pushStatus('skeptic', false);
     _resetStatusBar();
     vscode.window.showErrorMessage(`RunChecks: Skeptic failed — ${(err as Error).message}`);
   }
@@ -162,6 +219,9 @@ async function _runSkeptic(): Promise<void> {
 
 async function _finalizeReview(): Promise<void> {
   if (!currentSessionId) { return; }
+
+  _agentStates['orchestrator'] = 'running';
+  _pushStatus('orchestrator', false);
 
   try {
     let finalResult!: client.FinalizeResponse;
@@ -171,34 +231,38 @@ async function _finalizeReview(): Promise<void> {
     );
 
     currentSessionId = undefined;
+    _agentStates['orchestrator'] = 'passed';
+    _pushStatus('', false);
+
+    // Show final verdict page in the same panel
+    FindingsPanel.showVerdict(_context.extensionUri, finalResult);
+
     const { verdict, score } = finalResult;
     const icon = verdict === 'APPROVE' ? '✅' : verdict === 'BLOCK' ? '🚫' : '⚠️';
-    vscode.window.showInformationMessage(`${icon} RunChecks: ${verdict} — Score: ${score}/100`);
+    statusBarItem.text = `${icon} RunChecks — ${verdict} (${score}/100)`;
 
   } catch (err) {
+    _agentStates['orchestrator'] = 'failed';
+    _pushStatus('', false);
     vscode.window.showErrorMessage(`RunChecks: Finalize failed — ${(err as Error).message}`);
-  } finally {
     _resetStatusBar();
   }
 }
 
-// ─── Panel decision handlers ───────────────────────────────────────────────────
+// ─── Panel decision handler ────────────────────────────────────────────────────
 
 async function _handleFindingsDecision(stage: string, decision: string): Promise<void> {
   if (decision === 'change') {
     vscode.window.showInformationMessage('RunChecks: Review stopped. Address the findings and run again.');
+    _resetAllAgentStates();
     _resetStatusBar();
-    return;
-  }
-
-  if (decision === 'runSkeptic') {
-    await _runSkeptic();
     return;
   }
 
   // decision === 'approve'
   if (stage === 'factchecker') {
     await _runAgent('attacker');
+
   } else if (stage === 'attacker') {
     const pick = await vscode.window.showInformationMessage(
       'Attacker stage complete. Optionally run Skeptic shadow analysis, or finalize now.',
@@ -208,21 +272,17 @@ async function _handleFindingsDecision(stage: string, decision: string): Promise
     );
     if (pick === 'Run Skeptic') {
       await _runSkeptic();
-    } else {
+    } else if (pick === 'Finalize Now') {
       await _finalizeReview();
     }
-  } else {
-    // pre-processing or unknown
-    await _runAgent('factchecker');
-  }
-}
+    // pick === undefined means user pressed Escape/X — stay on current panel, do nothing
 
-async function _handleSkepticDecision(decision: string): Promise<void> {
-  if (decision === 'approve') {
+  } else if (stage === 'skeptic') {
     await _finalizeReview();
+
   } else {
-    vscode.window.showInformationMessage('RunChecks: Review stopped. Address the findings and run again.');
-    _resetStatusBar();
+    // pre-processing stage
+    await _runAgent('factchecker');
   }
 }
 
@@ -234,22 +294,22 @@ function _resetStatusBar(): void {
 
 /** Maps raw backend agent output → the TypeScript AgentResult shape FindingsPanel expects. */
 function _adaptAgentResult(raw: Record<string, unknown>, agent: string): AgentResult {
-  const rawFindings = (raw.findings as Record<string, unknown>[] | undefined) ?? [];
+  const rawFindings = (raw['findings'] as Record<string, unknown>[] | undefined) ?? [];
   const findings: AgentFinding[] = rawFindings.map(f => ({
-    type:        String(f.type   ?? f.category    ?? 'issue'),
-    severity:    (['critical','high','medium','low'].includes(String(f.severity))
-                    ? f.severity : 'low') as AgentFinding['severity'],
-    file:        String(f.filePath ?? f.file      ?? currentFilePath ?? ''),
-    line:        Number(f.line     ?? 0),
-    description: String(f.description ?? f.claim ?? ''),
-    suggestion:  String(f.suggestion  ?? ''),
+    type:        String(f['type']   ?? f['category']    ?? 'issue'),
+    severity:    (['critical','high','medium','low'].includes(String(f['severity']))
+                    ? f['severity'] : 'low') as AgentFinding['severity'],
+    file:        String(f['filePath'] ?? f['file']      ?? currentFilePath ?? ''),
+    line:        Number(f['line']     ?? 0),
+    description: String(f['description'] ?? f['claim'] ?? ''),
+    suggestion:  String(f['suggestion']  ?? ''),
   }));
 
   return {
-    agentName: String(raw.agent ?? agent),
+    agentName: String(raw['agent'] ?? agent),
     stage:     agent as AgentResult['stage'],
-    passed:    raw.status === 'pass',
+    passed:    raw['status'] === 'pass',
     findings,
-    summary:   raw.summary ? String(raw.summary) : undefined,
+    summary:   raw['summary'] ? String(raw['summary']) : undefined,
   };
 }
