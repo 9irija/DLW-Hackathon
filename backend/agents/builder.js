@@ -18,6 +18,7 @@ const fs = require('fs');
 const path = require('path');
 require('dotenv').config();
 const { complete } = require('../core/llm');
+const { trimCodeForPrompt } = require('../core/parser');
 
 // Default Codex (Responses API). Override with BUILDER_MODEL in .env to use Chat Completions (e.g. gpt-4o).
 const BUILDER_MODEL = process.env.CODEX_MODEL || process.env.BUILDER_MODEL || 'gpt-5-codex';
@@ -103,7 +104,7 @@ function repairTruncatedJson(raw) {
   let snippet = first !== -1 ? raw.slice(first) : raw;
 
   // Close any open string (odd number of unescaped quotes)
-  const quoteCount = (snippet.match(/(?<!\\)"/g) || []).length;
+  const quoteCount = (snippet.match(/"(?!\\)/g) || []).length;
   if (quoteCount % 2 !== 0) snippet += '"';
 
   // Close open arrays/objects by walking the bracket stack
@@ -128,23 +129,38 @@ async function analyseCode(submission) {
   const { code, filePath = 'unknown', lineStart = 0, lineEnd = 0 } = submission;
   const submissionId = crypto.randomUUID();
 
-  const userMessage = `
-SUBMISSION ID: ${submissionId}
-FILE: ${filePath}
-LINES: ${lineStart}–${lineEnd}
+  // trim the code if it's extremely long to avoid blowing past model token limits
+  let promptCode = trimCodeForPrompt(code, 12000);
+  if (promptCode !== code) {
+    console.warn(
+      `[builder] code length ${code.length} exceeds threshold; trimming for prompt`
+    );
+  }
 
-\`\`\`
-${code}
-\`\`\`
+  const fence = '```';
+  const hyphen = '-';
+  const userMessageLines = [];
+  userMessageLines.push('SUBMISSION ID: ' + submissionId);
+  userMessageLines.push('FILE: ' + filePath);
+  userMessageLines.push('LINES: ' + lineStart + hyphen + lineEnd);
+  userMessageLines.push('');
+  userMessageLines.push(fence);
+  userMessageLines.push(promptCode);
+  userMessageLines.push(fence);
+  userMessageLines.push('');
+  userMessageLines.push('(Note: sections marked "<CODE OMITTED: …>" were removed from the');
+  userMessageLines.push('prompt for brevity; assume the omitted portions continue in the same');
+  userMessageLines.push('style.)');
+  userMessageLines.push('');
+  userMessageLines.push('Analyse this code and return the CodeContext JSON object.');
+  userMessageLines.push('Populate submissionId with: ' + submissionId);
+  userMessageLines.push('Populate lineRange with: { "file": "' + filePath + '", "start": ' + lineStart + ', "end": ' + lineEnd + ' }');
+  userMessageLines.push('');
+  userMessageLines.push('IMPORTANT: Be concise — keep all string values short (intent ≤ 150 chars, each array');
+  userMessageLines.push('entry ≤ 80 chars). Omit the "rawCode" field entirely; it will be injected later.');
+  userMessageLines.push('Output ONLY raw JSON, no markdown fences, no explanation.');
 
-Analyse this code and return the CodeContext JSON object.
-Populate submissionId with: ${submissionId}
-Populate lineRange with: { "file": "${filePath}", "start": ${lineStart}, "end": ${lineEnd} }
-
-IMPORTANT: Be concise — keep all string values short (intent ≤ 150 chars, each array
-entry ≤ 80 chars). Omit the "rawCode" field entirely; it will be injected later.
-Output ONLY raw JSON, no markdown fences, no explanation.
-`;
+  const userMessage = userMessageLines.join('\n');
 
   let raw;
   let codeContext;
@@ -255,19 +271,33 @@ async function run(payload) {
       lineEnd,
     });
   } catch (err) {
-    return {
-      agent: 'builder',
-      status: 'fail',
-      findings: [{
-        line: undefined,
-        category: 'builder-error',
-        description: err.message,
-        severity: 'high',
-        suggestion: 'Check code and retry.',
-      }],
-      summary: `Builder analysis failed: ${err.message}`,
-      codeContext: null,
-    };
+    console.error('[builder] analyseCode error, retrying with trimmed code:', err.message);
+    // attempt a second pass with heavy trimming to ensure we at least return something
+    try {
+      const trimmedCode = trimCodeForPrompt(code, 4000);
+      codeContext = await analyseCode({
+        code: trimmedCode,
+        filePath: filePath || 'unknown',
+        lineStart,
+        lineEnd,
+      });
+      codeContext.intent = (codeContext.intent || '') +
+        ' (partial: original code was too large)';
+    } catch (err2) {
+      return {
+        agent: 'builder',
+        status: 'fail',
+        findings: [{
+          line: undefined,
+          category: 'builder-error',
+          description: err2.message,
+          severity: 'high',
+          suggestion: 'Check code and retry.',
+        }],
+        summary: `Builder analysis failed: ${err2.message}`,
+        codeContext: null,
+      };
+    }
   }
 
   const potentialRisks = codeContext.potentialRisks || [];

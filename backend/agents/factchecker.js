@@ -100,40 +100,131 @@ The summary should be one sentence describing how well the document matches the 
 
 // CHANGED: now accepts filePath and passes it through so findings can carry it.
 // Also calls extractSnippet() to attach a codeSnippet window around each line.
-async function checkInlineComments(code, filePath, language) {
-  const userContent = `File: ${filePath}\nLanguage: ${language}\n\nCode:\n\`\`\`\n${code}\n\`\`\`\n\nList every place where a comment or docstring does not match the implementation. Output JSON only.`;
+// ─── JSON parsing helpers ───────────────────────────────────────────────────
 
-  const raw     = (await complete({
-    model: FACTCHECKER_MODEL,
-    system: INLINE_SYSTEM,
-    user: userContent,
-    temperature: 0.2,
-    max_tokens: 2048,
-  })) || '';
-  const cleaned = raw.replace(/^```json\s*/i, '').replace(/\s*```\s*$/i, '').trim();
-  const parsed  = JSON.parse(cleaned);
+/**
+ * Attempt to repair and parse JSON output from an LLM response.  This
+ * mirrors the strategy used by builder.repairTruncatedJson but kept local
+ * to avoid cross-agent coupling.
+ * @param {string} raw
+ * @returns {object}
+ * @throws {Error} if parsing ultimately fails
+ */
+function repairTruncatedJson(raw) {
+  // strip markdown fences
+  let txt = raw.replace(/^```json?\s*/i, '').replace(/```\s*$/i, '').trim();
 
-  const findings = Array.isArray(parsed.findings)
-    ? parsed.findings.map(f => {
-        const line = typeof f.line === 'number' ? f.line : undefined;
-        return {
-          filePath,                                  // CHANGED: attach filePath to every finding
-          line,
-          // CHANGED: prefer the model's codeSnippet (the exact comment text),
-          // but fall back to extracting a line window from the source ourselves.
-          codeSnippet: f.codeSnippet
-            ? String(f.codeSnippet)
-            : extractSnippet(code, line),
-          claim:      String(f.claim      ?? ''),
-          reality:    String(f.reality    ?? ''),
-          severity:   ['low','medium','high'].includes(String(f.severity).toLowerCase())
-                        ? String(f.severity).toLowerCase() : 'medium',
-          suggestion: String(f.suggestion ?? ''),
-        };
-      })
-    : [];
+  // try straightforward parse
+  try { return JSON.parse(txt); } catch (_) {}
 
-  return { findings, summary: typeof parsed.summary === 'string' ? parsed.summary : '' };
+  // extract outermost braces
+  const first = txt.indexOf('{');
+  const last  = txt.lastIndexOf('}');
+  if (first !== -1 && last > first) {
+    try { return JSON.parse(txt.slice(first, last + 1)); } catch (_) {}
+  }
+
+  // attempt to close open strings and brackets
+  let snippet = first !== -1 ? txt.slice(first) : txt;
+
+  const quoteCount = (snippet.match(/(?<!\\)"/g) || []).length;
+  if (quoteCount % 2 !== 0) snippet += '"';
+
+  const stack = [];
+  for (const ch of snippet) {
+    if (ch === '{' || ch === '[') stack.push(ch === '{' ? '}' : ']');
+    else if ((ch === '}' || ch === ']') && stack.length) stack.pop();
+  }
+  snippet += stack.reverse().join('');
+
+  try { return JSON.parse(snippet); } catch (_) {}
+  throw new Error('Unable to repair JSON');
+}
+
+
+async function checkInlineComments(code, filePath, language, allowChunk = true) {
+  // If the model repeatedly fails on large input, split the code in half and
+  // analyse each part separately, then recombine the findings with adjusted
+  // line numbers. This recursion stops once allowChunk is false.
+  const performRequest = async (src) => {
+    // trim long code to keep prompts under model limits
+    const promptCode = require('../core/parser').trimCodeForPrompt(src, 12000);
+    if (promptCode !== src) {
+      console.warn(
+        `[factchecker] trimming code from ${src.length} to ${promptCode.length} chars for inline check`
+      );
+    }
+    const userContent = `File: ${filePath}\nLanguage: ${language}\n\nCode:\n\`\`\`\n${promptCode}\n\`\`\`\n\nList every place where a comment or docstring does not match the implementation. Output JSON only.`;
+
+    const raw = (await complete({
+      model: FACTCHECKER_MODEL,
+      system: INLINE_SYSTEM,
+      user: userContent,
+      temperature: 0.2,
+      max_tokens: 2048,
+    })) || '';
+
+    let parsed;
+    try {
+      parsed = repairTruncatedJson(raw);
+    } catch (err) {
+      throw new Error(`Inline parser error: ${err.message}. Raw response:\n${raw}`);
+    }
+    const findings = Array.isArray(parsed.findings)
+      ? parsed.findings.map(f => {
+          const line = typeof f.line === 'number' ? f.line : undefined;
+          return {
+            filePath,
+            line,
+            codeSnippet: f.codeSnippet
+              ? String(f.codeSnippet)
+              : extractSnippet(src, line),
+            claim:      String(f.claim      ?? ''),
+            reality:    String(f.reality    ?? ''),
+            severity:   ['low','medium','high'].includes(String(f.severity).toLowerCase())
+                          ? String(f.severity).toLowerCase() : 'medium',
+            suggestion: String(f.suggestion ?? ''),
+          };
+        })
+      : [];
+
+    return { findings, summary: typeof parsed.summary === 'string' ? parsed.summary : '' };
+  };
+
+  try {
+    return await performRequest(code);
+  } catch (err) {
+    console.error('[factchecker] inline check error:', err.message);
+    if (allowChunk && code.length > 4000) {
+      console.warn('[factchecker] falling back to chunked inline analysis');
+      // split at nearest newline around midpoint
+      const mid = Math.floor(code.length / 2);
+      const splitPos = code.lastIndexOf('\n', mid) || mid;
+      const left = code.slice(0, splitPos);
+      const right = code.slice(splitPos);
+      let leftRes = { findings: [], summary: '' };
+      let rightRes = { findings: [], summary: '' };
+      try {
+        leftRes = await checkInlineComments(left, filePath, language, false);
+      } catch (e) {
+        console.error('[factchecker] chunk-left analysis failed:', e.message);
+      }
+      try {
+        rightRes = await checkInlineComments(right, filePath, language, false);
+      } catch (e) {
+        console.error('[factchecker] chunk-right analysis failed:', e.message);
+      }
+      const leftLines = left.split('\n').length;
+      rightRes.findings.forEach(f => {
+        if (typeof f.line === 'number') f.line += leftLines;
+      });
+      return {
+        findings: leftRes.findings.concat(rightRes.findings),
+        summary: `${leftRes.summary}${leftRes.summary && rightRes.summary ? ' | ' : ''}${rightRes.summary}`,
+      };
+    }
+    throw err;
+  }
 }
 
 // ─── Pass 2: External document check ─────────────────────────────────────────
@@ -142,7 +233,14 @@ async function checkInlineComments(code, filePath, language) {
 // and attaches filePath to each finding so the UI knows which code file
 // the external doc was compared against.
 async function checkDocAgainstCode(code, filePath, doc) {
-  const userContent = `Document name: ${doc.name}\n\nDocument content:\n${doc.content.slice(0, 6000)}\n\n---\n\nActual source code (file: ${filePath}):\n\`\`\`\n${code.slice(0, 4000)}\n\`\`\`\n\nList every discrepancy between the document and the code. Output JSON only.`;
+  // trim both document and code for the prompt
+  const docText = doc.content.length > 6000 ? doc.content.slice(0, 6000) + '\n...<TRUNCATED>...' : doc.content;
+  let codeSnippet = code;
+  if (code.length > 4000) {
+    codeSnippet = require('../core/parser').trimCodeForPrompt(code, 4000);
+    console.warn(`[factchecker] trimming code to ${codeSnippet.length} chars for doc check (${doc.name})`);
+  }
+  const userContent = `Document name: ${doc.name}\n\nDocument content:\n${docText}\n\n---\n\nActual source code (file: ${filePath}):\n\`\`\`\n${codeSnippet}\n\`\`\`\n\nList every discrepancy between the document and the code. Output JSON only.`;
 
   const raw     = (await complete({
     model: FACTCHECKER_MODEL,
@@ -151,8 +249,13 @@ async function checkDocAgainstCode(code, filePath, doc) {
     temperature: 0.2,
     max_tokens: 2048,
   })) || '';
-  const cleaned = raw.replace(/^```json\s*/i, '').replace(/\s*```\s*$/i, '').trim();
-  const parsed  = JSON.parse(cleaned);
+
+  let parsed;
+  try {
+    parsed = repairTruncatedJson(raw);
+  } catch (err) {
+    throw new Error(`Doc parser error (${doc.name}): ${err.message}. Raw response:\n${raw}`);
+  }
 
   const findings = Array.isArray(parsed.findings)
     ? parsed.findings.map(f => ({
@@ -193,6 +296,7 @@ async function run(payload) {
 
   let allFindings = [];
   const summaryParts = [];
+  let inlineError = null;
 
   // ── Pass 1: Inline comments ───────────────────────────────────────────────
   try {
@@ -200,21 +304,39 @@ async function run(payload) {
     allFindings.push(...findings);
     if (summary) summaryParts.push(summary);
   } catch (err) {
+    inlineError = err.message;
     console.error('[factchecker] inline check error:', err.message);
-    summaryParts.push(`Inline check failed: ${err.message}`);
+  }
+
+  if (inlineError) {
+    summaryParts.push(`Inline check failed: ${inlineError}`);
   }
 
   // ── Pass 2: External documents (one call per doc) ─────────────────────────
-  // CHANGED: pass filePath through to checkDocAgainstCode so it can be
-  // attached to each finding.
   for (const doc of docs) {
     if (!doc?.content) continue;
+    let docError = null;
     try {
       const { findings, summary } = await checkDocAgainstCode(code, filePath, doc);
       allFindings.push(...findings);
       if (summary) summaryParts.push(`[${doc.name}] ${summary}`);
     } catch (err) {
+      docError = err.message;
       console.error(`[factchecker] doc check error (${doc.name}):`, err.message);
+      // try again with trimmed code if error occurs
+      try {
+        console.warn(`[factchecker] retrying doc check (${doc.name}) with trimmed code`);
+        const trimmed = require('../core/parser').trimCodeForPrompt(code, 4000);
+        const { findings, summary } = await checkDocAgainstCode(trimmed, filePath, doc);
+        allFindings.push(...findings);
+        if (summary) summaryParts.push(`[${doc.name}] ${summary} (partial)`);
+        docError = null; // succeed on retry
+      } catch (err2) {
+        console.error(`[factchecker] doc retry failed (${doc.name}):`, err2.message);
+      }
+    }
+    if (docError) {
+      summaryParts.push(`[${doc.name}] document check failed: ${docError}`);
     }
   }
 

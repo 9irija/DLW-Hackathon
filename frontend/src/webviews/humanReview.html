@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';">
+  <title>Human Review</title>
+  <style>
+    body {
+      margin: 0;
+      padding: 16px;
+      background: var(--vscode-editor-background);
+      color: var(--vscode-foreground);
+      font-family: var(--vscode-font-family, 'Segoe UI', sans-serif);
+      font-size: 13px;
+    }
+    h1 { margin: 0 0 6px; font-size: 1.1rem; }
+    h2 { margin: 16px 0 8px; font-size: 0.95rem; border-bottom: 1px solid var(--vscode-panel-border); padding-bottom: 5px; }
+    .sub { opacity: 0.75; margin-bottom: 10px; }
+    .card {
+      border: 1px solid var(--vscode-panel-border);
+      background: var(--vscode-editor-lineHighlightBackground);
+      border-radius: 6px;
+      padding: 10px;
+      margin-bottom: 10px;
+    }
+    .meta { font-size: 0.8rem; opacity: 0.8; margin-bottom: 6px; }
+    .sev {
+      display: inline-block;
+      font-size: 0.72rem;
+      font-weight: 700;
+      padding: 2px 8px;
+      border-radius: 10px;
+      margin-right: 6px;
+      text-transform: uppercase;
+    }
+    .sev-critical { background: rgba(229,20,0,0.2); color: #e51400; }
+    .sev-high { background: rgba(244,135,113,0.2); color: #f48771; }
+    .sev-medium { background: rgba(204,167,0,0.2); color: #cca700; }
+    .sev-low { background: rgba(137,209,133,0.2); color: #89d185; }
+    pre {
+      margin: 8px 0;
+      padding: 8px;
+      border-radius: 4px;
+      border: 1px solid var(--vscode-panel-border);
+      overflow-x: auto;
+      background: var(--vscode-editor-background);
+      font-size: 12px;
+    }
+    .kv { margin: 5px 0; }
+    .k { opacity: 0.8; font-weight: 600; }
+    .row { margin-bottom: 6px; }
+    .btns { margin-top: 14px; display: flex; gap: 8px; }
+    button {
+      border: 1px solid var(--vscode-button-border, transparent);
+      background: var(--vscode-button-background);
+      color: var(--vscode-button-foreground);
+      border-radius: 4px;
+      padding: 6px 12px;
+      cursor: pointer;
+    }
+    button.secondary {
+      background: var(--vscode-button-secondaryBackground);
+      color: var(--vscode-button-secondaryForeground);
+    }
+    .empty { opacity: 0.65; font-style: italic; }
+    .pill {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 10px;
+      font-size: 0.75rem;
+      border: 1px solid var(--vscode-panel-border);
+      margin-right: 6px;
+    }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script>
+    /*INJECT_DATA*/
+    const vscode = acquireVsCodeApi();
+    const root = document.getElementById('root');
+
+    const severityRank = { critical: 4, high: 3, medium: 2, low: 1 };
+
+    function esc(s) {
+      return String(s ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+    }
+
+    function sortFindings(findings) {
+      return [...(findings || [])].sort((a, b) => {
+        const sev = (severityRank[b.severity] || 0) - (severityRank[a.severity] || 0);
+        if (sev !== 0) return sev;
+        return (a.line || 0) - (b.line || 0);
+      });
+    }
+
+    function cardForFact(f, idx) {
+      const docRef = f.docSource
+        ? `Document: ${esc(f.docSource)}${f.docSection ? ` | Section: ${esc(f.docSection)}` : ''}${f.docPage != null ? ` | Page: ${esc(f.docPage)}` : ''}`
+        : 'Source: inline code comments/docstrings';
+
+      return `
+        <div class="card">
+          <div class="meta">
+            <span class="sev sev-${esc(f.severity || 'low')}">${esc(f.severity || 'low')}</span>
+            #${idx + 1} | ${esc(f.filePath || '-')} ${f.line ? `| line ${esc(f.line)}` : ''}
+          </div>
+          <div class="kv"><span class="k">Compared claim:</span> ${esc(f.claim || '')}</div>
+          <div class="kv"><span class="k">Code reality:</span> ${esc(f.reality || '')}</div>
+          <div class="kv"><span class="k">Reference:</span> ${docRef}</div>
+          ${f.codeSnippet ? `<pre>${esc(f.codeSnippet)}</pre>` : ''}
+          ${f.suggestion ? `<div class="kv"><span class="k">Suggestion:</span> ${esc(f.suggestion)}</div>` : ''}
+        </div>
+      `;
+    }
+
+    function cardForAttack(f, idx) {
+      return `
+        <div class="card">
+          <div class="meta">
+            <span class="sev sev-${esc(f.severity || 'low')}">${esc(f.severity || 'low')}</span>
+            #${idx + 1} | ${esc(f.filePath || '-')} ${f.line ? `| line ${esc(f.line)}` : ''}
+            ${f.cwe ? `| CWE-${esc(f.cwe)}` : ''}
+          </div>
+          <div class="kv"><span class="k">Vulnerability:</span> ${esc(f.type || 'issue')}</div>
+          <div class="kv"><span class="k">What is vulnerable:</span> ${esc(f.description || '')}</div>
+          ${f.attackVector ? `<div class="kv"><span class="k">Attack vector:</span> ${esc(f.attackVector)}</div>` : ''}
+          ${f.impact ? `<div class="kv"><span class="k">Impact:</span> ${esc(f.impact)}</div>` : ''}
+          ${f.codeSnippet ? `<pre>${esc(f.codeSnippet)}</pre>` : ''}
+          ${f.exploitProof ? `<div class="kv"><span class="k">PoC:</span> ${f.exploitProof.confirmed ? 'Confirmed' : 'Not confirmed'}${f.exploitProof.output ? ` | ${esc(String(f.exploitProof.output).slice(0, 180))}` : ''}</div>` : ''}
+          ${f.suggestion ? `<div class="kv"><span class="k">Suggestion:</span> ${esc(f.suggestion)}</div>` : ''}
+        </div>
+      `;
+    }
+
+    function renderCheckpointFact() {
+      const findings = sortFindings(reviewData.findings || []);
+      root.innerHTML = `
+        <h1>Factchecker Human Checkpoint</h1>
+        <div class="sub">Review the factchecker findings below. They are sorted by severity and include the compared guideline/comment, code location, and supporting snippet.</div>
+        <div class="row"><span class="pill">Status: ${esc(reviewData.status || 'unknown')}</span><span class="pill">Findings: ${findings.length}</span></div>
+        <div class="sub">${esc(reviewData.summary || '')}</div>
+        ${findings.length ? findings.map(cardForFact).join('') : '<p class="empty">No findings reported by factchecker.</p>'}
+        <div class="btns">
+          <button id="approve">Approve and Continue</button>
+          <button class="secondary" id="stop">Make Changes (Stop)</button>
+        </div>
+      `;
+
+      bindDecisionButtons('approve', 'stop');
+    }
+
+    function renderCheckpointAttack() {
+      const findings = sortFindings(reviewData.findings || []);
+      root.innerHTML = `
+        <h1>Attacker Human Checkpoint</h1>
+        <div class="sub">Review vulnerabilities in the current implementation before proceeding.</div>
+        <div class="row"><span class="pill">Status: ${esc(reviewData.status || 'unknown')}</span><span class="pill">Findings: ${findings.length}</span></div>
+        <div class="sub">${esc(reviewData.summary || '')}</div>
+        ${findings.length ? findings.map(cardForAttack).join('') : '<p class="empty">No vulnerabilities reported by attacker.</p>'}
+        <div class="btns">
+          <button id="approve">Approve and Continue</button>
+          <button class="secondary" id="stop">Make Changes (Stop)</button>
+        </div>
+      `;
+
+      bindDecisionButtons('approve', 'stop');
+    }
+
+    function renderSkepticChoice() {
+      root.innerHTML = `
+        <h1>Testing Choice Before Final Verdict</h1>
+        <div class="sub">
+          Skeptic runs shadow execution to simulate real-world behavior: it executes code or tests in isolation,
+          captures runtime failures, records evidence (failure timeline, endpoint heatmap, latency distribution),
+          and builds a system flow graph for impact analysis.
+        </div>
+        <div class="sub">
+          If you prefer, you can skip skeptic and use your own automated testing procedures instead.
+        </div>
+        <div class="btns">
+          <button id="run_skeptic">Run Skeptic (Shadow)</button>
+          <button class="secondary" id="own_tests">Use My Own Tests</button>
+        </div>
+      `;
+
+      document.getElementById('run_skeptic').addEventListener('click', () => {
+        vscode.postMessage({ type: 'decision', value: 'run_skeptic' });
+      });
+      document.getElementById('own_tests').addEventListener('click', () => {
+        vscode.postMessage({ type: 'decision', value: 'own_tests' });
+      });
+    }
+
+    function renderFinal() {
+      const verdict = reviewData.final?.verdict || 'unknown';
+      const score = reviewData.final?.score ?? '-';
+      const statuses = reviewData.final?.agentStatuses || {};
+      const fact = sortFindings(reviewData.final?.agentResults?.factchecker?.findings || []);
+      const attack = sortFindings(reviewData.final?.agentResults?.attacker?.findings || []);
+      const skeptic = reviewData.final?.agentResults?.skeptic || {};
+
+      root.innerHTML = `
+        <h1>Final Human Review Overview</h1>
+        <div class="sub">End-to-end overview of checkpointed review and final result.</div>
+        <div class="row">
+          <span class="pill">Verdict: ${esc(verdict).toUpperCase()}</span>
+          <span class="pill">Score: ${esc(score)} / 100</span>
+          <span class="pill">Testing: ${esc(reviewData.testingMode || 'user')}</span>
+        </div>
+        <div class="sub">${esc(reviewData.final?.summary || '')}</div>
+
+        <h2>Agent Status</h2>
+        <div class="row">
+          ${Object.entries(statuses).map(([k, v]) => `<span class="pill">${esc(k)}: ${esc(v)}</span>`).join('') || '<span class="empty">No status data.</span>'}
+        </div>
+
+        <h2>Factchecker Highlights</h2>
+        ${fact.length ? fact.slice(0, 8).map(cardForFact).join('') : '<p class="empty">No factchecker issues.</p>'}
+
+        <h2>Attacker Highlights</h2>
+        ${attack.length ? attack.slice(0, 8).map(cardForAttack).join('') : '<p class="empty">No attacker vulnerabilities.</p>'}
+
+        <h2>Skeptic Result</h2>
+        <div class="card">
+          <div class="kv"><span class="k">Status:</span> ${esc(skeptic.status || 'not-run')}</div>
+          ${skeptic.summary ? `<div class="kv"><span class="k">Summary:</span> ${esc(skeptic.summary)}</div>` : ''}
+          ${skeptic.confidence != null ? `<div class="kv"><span class="k">Confidence:</span> ${esc(skeptic.confidence)} / 100</div>` : ''}
+        </div>
+
+        <div class="btns">
+          <button id="close">Close</button>
+        </div>
+      `;
+
+      document.getElementById('close').addEventListener('click', () => {
+        vscode.postMessage({ type: 'decision', value: 'close' });
+      });
+    }
+
+    function bindDecisionButtons(approveValue, stopValue) {
+      document.getElementById('approve').addEventListener('click', () => {
+        vscode.postMessage({ type: 'decision', value: approveValue });
+      });
+      document.getElementById('stop').addEventListener('click', () => {
+        vscode.postMessage({ type: 'decision', value: stopValue });
+      });
+    }
+
+    const mode = reviewData.mode || 'final';
+    if (mode === 'checkpoint-factchecker') renderCheckpointFact();
+    else if (mode === 'checkpoint-attacker') renderCheckpointAttack();
+    else if (mode === 'skeptic-choice') renderSkepticChoice();
+    else renderFinal();
+  </script>
+</body>
+</html>

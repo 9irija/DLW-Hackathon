@@ -25,7 +25,7 @@ async function main() {
   const payload = buildReviewPayload(sampleCode, 'example.js');
   console.log('Running factchecker on sample code (comment/code mismatches included)...\n');
 
-  const result = await run(payload);
+  let result = await run(payload);
 
   console.log('Agent:', result.agent);
   console.log('Status:', result.status);
@@ -36,6 +36,22 @@ async function main() {
       console.log(`  ${i + 1}. Line ${f.line}: "${f.claim}" → reality: ${f.reality} [${f.severity}]`);
       console.log(`     Suggestion: ${f.suggestion}`);
     });
+  }
+
+  // second test: large Python file if present
+  try {
+    const fs = require('fs');
+    const path = require('path');
+    const largePath = path.resolve(__dirname, 'testcasefile.py');
+    if (fs.existsSync(largePath)) {
+      console.log('\nRunning factchecker on testcasefile.py to reproduce parsing issues...\n');
+      const code = fs.readFileSync(largePath, 'utf8');
+      const payload2 = buildReviewPayload(code, 'testcasefile.py');
+      result = await run(payload2);
+      console.log('Large file agent status:', result.status, 'findings:', result.findings.length);
+    }
+  } catch (e) {
+    console.warn('Large-file test failed:', e.message);
   }
 }
 
