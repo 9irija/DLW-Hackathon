@@ -93,9 +93,9 @@ function sliceByLines(text, startLine, endLine) {
 const INLINE_SYSTEM = `You are a fact-checker for source code. Compare every comment, docstring, JSDoc, and inline documentation in the code with what the code actually does.
 
 For each mismatch output one finding with:
-- line: approximate line number (number) where the comment/docs appear
-- codeSnippet: the exact comment or docstring text that is wrong (copy it verbatim, one line max)
-- claim: what the comment/documentation says
+- line: line number of the IMPLEMENTATION CODE that contradicts the comment (e.g. the function body, return statement, or assignment that is wrong — NOT the comment/docstring line itself)
+- codeSnippet: the 1-3 implementation code lines that are wrong (copy verbatim from the numbered source, do NOT copy the comment)
+- claim: what the comment/documentation says (copy the comment text verbatim)
 - reality: what the code actually does (brief)
 - severity: "low" | "medium" | "high"
 - suggestion: how to fix the comment or the code (one short sentence)
@@ -115,16 +115,16 @@ Identify every place where the document makes a claim or requirement that does n
 For each discrepancy output one finding with:
 - docSection: the section heading or sub-heading in the document where the claim appears (e.g. "## Installation" or "Configuration > Timeouts"). Use "unknown" if the document has no headings.
 - docPage: the page number where the claim appears, as an integer, if the document is paginated (e.g. a PDF). Use null if not applicable.
+- line: the approximate line number in the SOURCE CODE (not the document) where this discrepancy is most visible. Look for the relevant function, method, or variable in the code and give its line number. Use null if the issue affects the whole file rather than a specific location.
 - claim: what the document says (quote or paraphrase)
 - reality: what the code actually does
 - severity: "low" | "medium" | "high"
 - suggestion: how to fix the document or the code (one short sentence)
 
-Do not include a "line" field — external documents do not have code line numbers.
 If the document accurately describes the code, return an empty findings array.
 
 Respond with valid JSON only (no markdown, no extra text):
-{"findings": [{"docSection": string, "docPage": number|null, "claim": string, "reality": string, "severity": string, "suggestion": string}], "summary": string}
+{"findings": [{"docSection": string, "docPage": number|null, "line": number|null, "claim": string, "reality": string, "severity": string, "suggestion": string}], "summary": string}
 The summary should be one sentence describing how well the document matches the code.`;
 
 const RULE_VERIFY_SYSTEM = `You are a strict requirements verifier. Only report findings where the code fails or cannot be confirmed to meet a requirement. If the code clearly satisfies a requirement, do not include it in findings.`;
@@ -195,7 +195,12 @@ async function checkInlineComments(code, filePath, language, allowChunk = true) 
         `[factchecker] trimming code from ${src.length} to ${promptCode.length} chars for inline check`
       );
     }
-    const userContent = `File: ${filePath}\nLanguage: ${language}\n\nCode:\n\`\`\`\n${promptCode}\n\`\`\`\n\nList every place where a comment or docstring does not match the implementation. Output JSON only.`;
+    // Number each line (1-based within segment) so the LLM reports accurate line numbers.
+    // The seg.lineStart-1 offset is applied by the caller after performRequest returns.
+    const numberedCode = promptCode.split('\n')
+      .map((l, i) => `${i + 1}: ${l}`)
+      .join('\n');
+    const userContent = `File: ${filePath}\nLanguage: ${language}\n\nCode (each line prefixed with its line number):\n\`\`\`\n${numberedCode}\n\`\`\`\n\nList every place where a comment or docstring does not match the implementation. Output JSON only.`;
 
     const raw = (await complete({
       model: FACTCHECKER_MODEL,
@@ -213,13 +218,16 @@ async function checkInlineComments(code, filePath, language, allowChunk = true) 
     }
     const findings = Array.isArray(parsed.findings)
       ? parsed.findings.map(f => {
-          const line = typeof f.line === 'number' ? f.line : undefined;
+          // Coerce: LLMs sometimes return line numbers as strings ("257" not 257)
+          const lineRaw = Number(f.line);
+          const line = (lineRaw > 0 && Number.isFinite(lineRaw)) ? lineRaw : undefined;
+          // Always extract from the actual source around the reported line so the
+          // card shows real implementation code, not the comment the LLM may echo.
+          const snippet = extractSnippet(src, line) || (f.codeSnippet ? String(f.codeSnippet) : '');
           return {
             filePath,
             line,
-            codeSnippet: f.codeSnippet
-              ? String(f.codeSnippet)
-              : extractSnippet(src, line),
+            codeSnippet: snippet,
             claim:      String(f.claim      ?? ''),
             reality:    String(f.reality    ?? ''),
             severity:   ['low','medium','high'].includes(String(f.severity).toLowerCase())
@@ -296,11 +304,13 @@ async function checkDocAgainstCode(code, filePath, doc, meta, plainText) {
   const aggregated = { findings: [], summary: '' };
   const totalSections = snippets.length;
 
-  let codeSnippet = code;
+  let codeForLLM = code;
   if (code.length > 4000) {
-    codeSnippet = require('../core/parser').trimCodeForPrompt(code, 4000);
-    console.warn(`[factchecker] trimming code to ${codeSnippet.length} chars for doc check (${doc.name})`);
+    codeForLLM = require('../core/parser').trimCodeForPrompt(code, 4000);
+    console.warn(`[factchecker] trimming code to ${codeForLLM.length} chars for doc check (${doc.name})`);
   }
+  // Number each line so the LLM can report accurate source line numbers
+  const numberedCodeForDoc = codeForLLM.split('\n').map((l, i) => `${i + 1}: ${l}`).join('\n');
 
   if (totalSections > 1) {
     console.warn(`[factchecker] Pass 2 (doc vs code): ${doc.name}, ${totalSections} sections (concurrency ${DOC_SECTION_CONCURRENCY})...`);
@@ -313,7 +323,7 @@ async function checkDocAgainstCode(code, filePath, doc, meta, plainText) {
     let docText = snip.text;
     if (docText.length > 6000) docText = docText.slice(0, 6000) + '\n...<TRUNCATED>...';
 
-    const userContent = `Document name: ${doc.name}\nSection: ${snip.title}\n\nDocument content:\n${docText}\n\n---\n\nActual source code (file: ${filePath}):\n\`\`\`\n${codeSnippet}\n\`\`\`\n\nList every discrepancy between the document and the code. Output JSON only.`;
+    const userContent = `Document name: ${doc.name}\nSection: ${snip.title}\n\nDocument content:\n${docText}\n\n---\n\nActual source code (file: ${filePath}, each line prefixed with its line number):\n\`\`\`\n${numberedCodeForDoc}\n\`\`\`\n\nList every discrepancy between the document and the code. Output JSON only.`;
 
     const raw = (await complete({
       model: FACTCHECKER_MODEL,
@@ -332,19 +342,23 @@ async function checkDocAgainstCode(code, filePath, doc, meta, plainText) {
     }
 
     const findings = Array.isArray(parsed.findings)
-      ? parsed.findings.map(f => ({
-          filePath,
-          line: undefined,
-          codeSnippet: undefined,
-          claim:      String(f.claim      ?? ''),
-          reality:    String(f.reality    ?? ''),
-          severity:   ['low','medium','high'].includes(String(f.severity).toLowerCase())
-                        ? String(f.severity).toLowerCase() : 'medium',
-          suggestion: String(f.suggestion ?? ''),
-          docSource:  doc.name,
-          docSection: snip.title || (f.docSection ? String(f.docSection) : 'unknown'),
-          docPage:    snip.page != null ? snip.page : (typeof f.docPage === 'number' ? f.docPage : null),
-        }))
+      ? parsed.findings.map(f => {
+          const codeLineRaw = Number(f.line);
+          const codeLine = (codeLineRaw > 0 && Number.isFinite(codeLineRaw)) ? codeLineRaw : undefined;
+          return {
+            filePath,
+            line:        codeLine,
+            codeSnippet: codeLine ? extractSnippet(code, codeLine) : undefined,
+            claim:       String(f.claim      ?? ''),
+            reality:     String(f.reality    ?? ''),
+            severity:    ['low','medium','high'].includes(String(f.severity).toLowerCase())
+                           ? String(f.severity).toLowerCase() : 'medium',
+            suggestion:  String(f.suggestion ?? ''),
+            docSource:   doc.name,
+            docSection:  snip.title || (f.docSection ? String(f.docSection) : 'unknown'),
+            docPage:     snip.page != null ? snip.page : (typeof f.docPage === 'number' ? f.docPage : null),
+          };
+        })
       : [];
 
     const summary = parsed.summary ? `[${snip.title}] ${parsed.summary}` : '';
@@ -382,6 +396,7 @@ async function verifyExplicitRules(plainText, code, filePath, doc) {
   if (!explicitRules.length) return { findings: [], summary: '' };
 
   const trimmedCode = require('../core/parser').trimCodeForPrompt(code, 6000);
+  const numberedCode = trimmedCode.split('\n').map((l, i) => `${i + 1}: ${l}`).join('\n');
 
   const userContent = `You are verifying whether source code satisfies a list of requirements extracted from a document.
 
@@ -390,16 +405,17 @@ For each requirement below, check whether the code actually satisfies it.
 Requirements:
 ${explicitRules.map((r, i) => `${i + 1}. ${r}`).join('\n')}
 
-Source code (file: ${filePath}):
+Source code (file: ${filePath}, each line prefixed with its line number):
 \`\`\`
-${trimmedCode}
+${numberedCode}
 \`\`\`
 
 For each requirement, output a finding ONLY if the code does NOT satisfy it, or if you cannot determine whether it does.
 If the code clearly satisfies a requirement, omit it from findings entirely.
+For each finding, also identify the approximate line number in the source code where the discrepancy is most visible (the relevant function, variable, or block). Use null if it affects the whole file.
 
 Respond with valid JSON only (no markdown, no extra text):
-{"findings": [{"ruleIndex": number, "claim": string, "reality": string, "severity": "low"|"medium"|"high", "suggestion": string}], "summary": string}`;
+{"findings": [{"ruleIndex": number, "line": number|null, "claim": string, "reality": string, "severity": "low"|"medium"|"high", "suggestion": string}], "summary": string}`;
 
   const raw = (await complete({
     model: FACTCHECKER_MODEL,
@@ -417,19 +433,23 @@ Respond with valid JSON only (no markdown, no extra text):
     return { findings: [], summary: '' };
   }
 
-  const findings = (parsed.findings || []).map(f => ({
-    filePath,
-    line: undefined,
-    codeSnippet: undefined,
-    claim: explicitRules[Number(f.ruleIndex) - 1] ?? String(f.claim ?? ''),
-    reality: String(f.reality ?? ''),
-    severity: ['low', 'medium', 'high'].includes(String(f.severity).toLowerCase())
-      ? String(f.severity).toLowerCase() : 'medium',
-    suggestion: String(f.suggestion ?? ''),
-    docSource: doc.name,
-    docSection: 'requirements',
-    docPage: null,
-  }));
+  const findings = (parsed.findings || []).map(f => {
+    const codeLineRaw = Number(f.line);
+    const codeLine = (codeLineRaw > 0 && Number.isFinite(codeLineRaw)) ? codeLineRaw : undefined;
+    return {
+      filePath,
+      line:        codeLine,
+      codeSnippet: codeLine ? extractSnippet(code, codeLine) : undefined,
+      claim:       explicitRules[Number(f.ruleIndex) - 1] ?? String(f.claim ?? ''),
+      reality:     String(f.reality ?? ''),
+      severity:    ['low', 'medium', 'high'].includes(String(f.severity).toLowerCase())
+                     ? String(f.severity).toLowerCase() : 'medium',
+      suggestion:  String(f.suggestion ?? ''),
+      docSource:   doc.name,
+      docSection:  'requirements',
+      docPage:     null,
+    };
+  });
 
   return {
     findings,
