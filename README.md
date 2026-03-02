@@ -1,180 +1,47 @@
-# Multi-Agent AI Code Review — VS Code Extension
+# RunChecks — AI-Powered Code Review
 
-Four specialized AI agents review your code with **human verification at every stage**. The orchestrator manages the full pipeline and synthesizes findings into a scored verdict: `approve / request-changes / block`.
+> **AI-powered code review. Human-controlled decisions.**
 
-Built for the **DLW Hackathon — OpenAI Track** using the **App Server** integration pattern (OpenAI Responses API + Codex models served via an Express backend).
+Six specialized AI agents review your code in three sequential stages. A human checkpoint gate appears after every stage — you decide whether to approve and continue, stop and make changes, or request an optional deeper analysis. The orchestrator synthesizes all findings into a scored verdict: `APPROVE / REQUEST CHANGES / BLOCK`.
 
----
-
-## Human-in-the-Loop Review Flow
-
-The key feature of this extension is **three human checkpoints** built into the review pipeline. Each agent runs one at a time and pauses for your decision before proceeding.
-
-```
-[VS Code Extension — runReviewStepped()]
-        │
-        │  POST /review/start
-        ▼
-[Orchestrator — startReview()]
-  Runs Builder → enriches payload with codeContext
-        │
-        ▼
-  [CHECKPOINT 1] ── "Potential risks: X. Continue to Factchecker?"
-                        Approve & Continue  ──►  POST /review/next (factchecker)
-                        Stop Review         ──►  POST /review/finalize → partial verdict
-        │
-        │  POST /review/next { agent: 'factchecker' }
-        ▼
-[Orchestrator — runAgent('factchecker')]
-  Factchecker runs (inline + doc passes) → findings shown in panel
-        │
-        ▼
-  [CHECKPOINT 2] ── "N finding(s) found. Continue to Security Scan?"
-                        Approve & Continue  ──►  POST /review/next (attacker)
-                        Stop & Get Verdict  ──►  POST /review/finalize → partial verdict
-        │
-        │  POST /review/next { agent: 'attacker' }
-        ▼
-[Orchestrator — runAgent('attacker')]
-  Attacker runs (3-step exploit pipeline) → findings shown in panel
-        │
-        ▼
-  [CHECKPOINT 3] ── "N vulnerabilities found. Run Skeptic for enhanced review?"
-                        Yes — Run Skeptic  ──►  POST /review/next (skeptic)
-                                                then POST /review/finalize
-                        No — Get Verdict   ──►  POST /review/finalize (without skeptic)
-        │
-        ▼
-[Orchestrator — finalize()]
-  Normalise + deduplicate all findings
-  Builder challenge loop (critical findings only)
-  Score + verdict + summary → response
-        │
-        ▼
-[Frontend panels update: Findings, Charts, Agent Status, Verdict]
-```
-
-> Stopping early at any checkpoint still produces a full scored verdict based on the agents that ran.
+Built for the **DLW Hackathon — OpenAI Track** using the OpenAI Responses API with Codex models, served through an Express backend.
 
 ---
 
-## How It Works — Full Pipeline Detail
+## Agent Pipeline
 
 ```
-[VS Code Extension]
-        │  POST /review/start  { code, filePath, language, workspaceRoot, docs? }
-        ▼
-[Express Backend — index.js]  (thin HTTP layer)
-  • Detect language, chunk code (1 500-char chunks, 200-char overlap)
-  • Embed each chunk via text-embedding-3-small → store in SQLite (RAG)
-  • Retrieve top-5 similar chunks from previous sessions as context
-  • Delegates all agent execution to Orchestrator
-        │
-        ▼
-[Orchestrator — orchestrator.js]  (sole agent manager)
-        │
-        ├─ startReview() ── Builder (gpt-5-codex, always first)
-        │    Analyses intent, entry points, dependencies, data flows,
-        │    external calls, side effects, and preliminary risks.
-        │    → Produces codeContext used to enrich all downstream prompts.
-        │
-        ├─ runAgent('factchecker') ── Factchecker (gpt-5-codex) — TWO PASSES
-        │    │    Pass 1 — Inline: compares every comment/docstring in the
-        │    │             code against what the code actually does.
-        │    │             Findings tagged with line, codeSnippet.
-        │    │    Pass 2 — Docs (only when docs[] provided): compares each
-        │    │             external document (README, API spec, design doc)
-        │    │             against the actual implementation.
-        │    │             Findings tagged with docSource, docSection, docPage.
-        │    │
-        ├─ runAgent('attacker') ── Attacker (gpt-5-codex + gpt-5.1-codex-mini + shadow/runner)
-        │    │    Step 1 — Static scan (gpt-5-codex): finds vulnerabilities,
-        │    │             maps to CWE IDs, rates severity, describes impact.
-        │    │    Step 2 — PoC generation (gpt-5.1-codex-mini, high/critical only):
-        │    │             writes a self-contained Node.js exploit script that
-        │    │             mocks the vulnerable logic and crafts a malicious input.
-        │    │    Step 3 — Shadow execution (child_process, 5 s timeout):
-        │    │             if the PoC exits 0 and prints "CONFIRMED",
-        │    │             exploitProof.confirmed = true.
-        │    │
-        ├─ runAgent('skeptic') ── Skeptic (shadow/runner + flowParser) [optional]
-        │         Runs the code (or full test suite if workspaceRoot provided)
-        │         in an isolated child_process. Builds evidence charts:
-        │         failure timeline, endpoint heatmap, latency distribution,
-        │         user-journey failures. Parses import graph → flow diagram.
-        │
-        └─ finalize() ── Phases 3 → 5
-             │
-             ├─ Phase 3: Normalise & deduplicate findings
-             │    All agent outputs mapped to a common shape.
-             │    Doc findings (line = null) are never deduplicated — all kept.
-             │    Same line + same type across agents → keep highest severity.
-             │    Sorted: severity desc → confidence desc.
-             │
-             ├─ Phase 4: Builder challenge loop (critical findings only)
-             │    For each critical finding from factchecker or attacker,
-             │    builder.respondToChallenge() is called → assessment:
-             │    "acknowledged" | "disputed" | "requires_fix" + proposedFix.
-             │    Response is attached to the finding as challengeResponse.
-             │
-             └─ Phase 5: Score + verdict + summary
-                  Score: 100 − deductions (floor 0)
-                    critical: −25  |  high: −15  |  medium: −5  |  low: −2
-                    confirmed PoC:  −10 each (additional)
-                  Verdict:
-                    block           → any critical  OR  confirmed PoC exploit
-                    request-changes → any high  OR  attacker/factchecker status = fail
-                    approve         → medium/low only, all agents pass or warn
-        │
-        ▼
-[Response to Extension]
-  agentResults, agentStatuses, prioritizedFindings (with docSource, challengeResponse),
-  challengeResponses, verdict, score, summary, sessionId
-        │
-        ▼
-[Frontend Panels]
-  • Status bar item       — bottom-left of VS Code window
-                              $(shield) Code Review   — idle
-                              $(sync~spin) Reviewing… — review in progress
-                              $(pass) APPROVE 85/100  — after approve verdict
-                              $(warning) CHANGES 65   — after request-changes verdict
-                              $(error) BLOCK 40/100   — after block verdict
-                            Click to open findings panel. Tooltip shows full summary.
-  • Agent Status sidebar  — per-agent ✅/⚠️/❌ status chips with summary tooltips
-  • Verdict sidebar       — verdict icon, score, finding counts by severity,
-                            builder challenge acknowledgement ratio, summary
-  • Findings webview      — pipeline strip at top (all 4 agents, ✅/⚠️/❌/⏳ per stage)
-                            severity bar (colour-coded horizontal bar, animated on load)
-                            unified findings table sorted by severity; per-finding extras:
-                              inline findings: line number, codeSnippet, claim, reality
-                              doc findings:    docSource, docSection, docPage, claim, reality
-                              attacker:        CWE badge, attackVector, impact, PoC status
-                              skeptic:         confidence score, category
-                              all critical:    builder challengeResponse + proposedFix
-                            Intermediate display (between checkpoints):
-                              pipeline strip showing completed vs pending agents
-                              animated severity bar across partial findings
-                              spinning "Review in progress" banner + per-agent tables
-  • Charts webview        — animated score ring (SVG arc sweeps to final score, count-up number)
-                            severity radar by agent, skeptic evidence (4 charts:
-                            failure timeline, endpoint heatmap, latency distribution,
-                            user journey failures), system flow diagram,
-                            per-finding confidence bars
+⚙️  Code Parser     ─┐
+                      ├─ Pre-processing (runs automatically on review start)
+🧠 Code Reasoner   ─┘
+                           👤 GATE 0: Notification — Continue to Fact Checker or Stop
+──────────────── STAGE 1 ─────────────────────────────────────────────────────
+🕵️  Fact Checker      — comment accuracy, doc compliance, hallucination detection
+                           👤 GATE 1: FindingsPanel — Approve & Continue or Request Changes
+──────────────── STAGE 2 ─────────────────────────────────────────────────────
+⚔️  Attacker          — OWASP security scan, PoC exploit generation, CWE tagging
+                           👤 GATE 2: FindingsPanel — Approve & Continue or Request Changes
+──────────────── STAGE 3 (Optional) ─────────────────────────────────────────
+🧪 Skeptic           — shadow execution, traffic replay, latency impact scoring
+                           👤 GATE 3: SkepticPanel — Approve as Safe or Request Changes
+─────────────────────────────────────────────────────────────────────────────
+🎯 Orchestrator      — compute final verdict + score from all collected results
 ```
+
+Pre-processing (Parser + Reasoner) is always synchronous and automatic. Every subsequent stage requires explicit human approval before the next agent runs — nothing advances without a deliberate decision.
 
 ---
 
-## OpenAI Integration — App Server Pattern
+## What Each Agent Does
 
-This project uses the **App Server** integration pattern from the OpenAI Codex SDK:
-
-- The VS Code extension is a **thin client** — it sends code to a local Express server and renders results.
-- The **Express backend** (`backend/index.js`) acts as the App Server — it calls OpenAI APIs on behalf of the client.
-- All LLM calls go through `backend/core/llm.js` which routes to:
-  - **Responses API** (`openai.responses.create`) when the model name contains `"codex"` (e.g. `gpt-5-codex`)
-  - **Chat Completions API** (`openai.chat.completions.create`) for all other model names
-
-This keeps the OpenAI API key server-side and lets you swap models without changing the extension.
+| Agent | Role | Output |
+|---|---|---|
+| **Parser** | Splits code into logical segments (functions, classes, blocks) | Structured segments with language + line ranges |
+| **Reasoner** | Enriches segments with doc context → `CodeContext` | Unified analysis payload for downstream agents |
+| **Fact Checker** | Two-pass accuracy check: inline comments vs implementation, external docs vs code | Findings with `claim`, `reality`, `severity`, `suggestion` |
+| **Attacker** | Adversarial security scan: injection, auth bypass, data exposure, OWASP Top-10 | Findings with CWE ID, PoC evidence, exploit risk |
+| **Skeptic** | Shadow execution, test result diff, traffic replay, latency impact | Pass/fail breakdown, latency tables, user journey status |
+| **Orchestrator** | Collects results, normalises findings, computes score, issues verdict | `verdict`, `score`, `prioritizedFindings`, `agentResults` |
 
 ---
 
@@ -182,240 +49,166 @@ This keeps the OpenAI API key server-side and lets you swap models without chang
 
 ```
 RunChecks/
+├── .vscode/
+│   ├── launch.json          ← F5 launches extension from repo root
+│   └── tasks.json           ← compile-frontend / watch-frontend / start-backend
+│
 ├── backend/
 │   ├── agents/
-│   │   ├── builder.js       # gpt-5-codex — code context provider + challenge responder
-│   │   ├── factchecker.js   # gpt-5-codex — inline comment check + external doc review
-│   │   ├── attacker.js      # gpt-5-codex + gpt-5.1-codex-mini + shadow — 3-step exploit pipeline
-│   │   ├── skeptic.js       # shadow/runner + flowParser — shadow execution + evidence (no LLM)
-│   │   └── orchestrator.js  # 5-phase pipeline controller → verdict + score
+│   │   ├── orchestrator.js  ← pipeline controller, finalize(), runAgent()
+│   │   ├── parser.js        ← code splitting into logical segments
+│   │   ├── reasoner.js      ← CodeContext enrichment
+│   │   ├── docreader.js     ← PDF / DOCX / Markdown ingestion + text extraction
+│   │   ├── factchecker.js   ← two-pass accuracy check (inline + external docs)
+│   │   ├── attacker.js      ← security scan + PoC exploit generation
+│   │   └── skeptic.js       ← shadow execution, traffic replay, latency scoring
 │   ├── core/
-│   │   ├── openai.js        # Shared OpenAI client (reads OPENAI_API_KEY)
-│   │   ├── llm.js           # complete() — Chat Completions or Responses API (Codex)
-│   │   ├── parser.js        # chunkCode, detectLanguage, buildReviewPayload
-│   │   └── logger.js        # SQLite audit_log (logEntry, updateDecision, getEntries)
+│   │   ├── llm.js           ← unified LLM client (Responses API + Chat Completions)
+│   │   ├── logger.js        ← SQLite audit_log (session audit trail)
+│   │   └── parser.js        ← buildReviewPayload, chunkCode, detectLanguage
 │   ├── context/
-│   │   ├── embeddings.js    # embed() via text-embedding-3-small + cosineSimilarity
-│   │   └── storage.js       # storeChunk, retrieveTopChunks (top-5 cosine), clearSession
+│   │   ├── embeddings.js    ← text-embedding-3-small via OpenAI
+│   │   └── storage.js       ← chunk store + cosine similarity retrieval (top-5)
 │   ├── shadow/
-│   │   ├── runner.js        # child_process snippet executor (JS only, 5 s timeout)
-│   │   ├── testRunner.js    # npm test runner — parses Jest output (pass/fail/timing)
-│   │   └── flowParser.js    # regex-based require/import extractor → {nodes, edges}
-│   ├── index.js             # Express: POST /review/start, /review/next, /review/finalize, /review, /decision, GET /health
+│   │   └── runner.js        ← child_process snippet executor (JS)
+│   ├── data/audit.db        ← SQLite database (auto-created)
 │   ├── .env.example
+│   └── index.js             ← Express server (port 3001)
+│
+├── frontend/                ← VS Code extension (TypeScript + webpack)
+│   ├── src/
+│   │   ├── extension.ts          ← activate(), HITL stepped review flow
+│   │   ├── extension.js          ← legacy JS extension (HITL, kept for reference)
+│   │   ├── types/agents.ts       ← shared TypeScript interfaces
+│   │   ├── utils/
+│   │   │   ├── backendClient.ts  ← HTTP client (startReview, runNextAgent, finalizeReview)
+│   │   │   ├── highlighter.ts    ← VS Code decoration API (per-severity line highlights)
+│   │   │   └── messageHandler.ts ← CSP nonce + HTML escaping
+│   │   └── panels/
+│   │       ├── AgentStatusPanel.ts  ← sidebar WebviewView — live pipeline strip
+│   │       ├── SetupPanel.ts        ← doc upload (local memory) + guidance
+│   │       ├── FindingsPanel.ts     ← per-agent findings + Approve / Request Changes
+│   │       └── SkepticPanel.ts      ← test results, Chart.js bar chart, flow diagram
+│   ├── media/icon.svg
+│   ├── webpack.config.js
+│   ├── tsconfig.json
 │   └── package.json
 │
-└── frontend/
-    ├── src/
-    │   ├── extension.js          # activate(), 5 commands, stepped review flow, auto-review on save
-    │   ├── panels/
-    │   │   ├── agentStatus.js    # Sidebar tree: per-agent status chips
-    │   │   ├── findings.js       # Webview panel: loads findings.html
-    │   │   ├── verdict.js        # Sidebar tree: verdict, score, counts, challenge info
-    │   │   └── skepticCharts.js  # Webview panel: loads charts.html
-    │   └── webviews/
-    │       ├── findings.html     # Findings table (final) + intermediate view between checkpoints
-    │       └── charts.html       # Severity radar + skeptic evidence + flow diagram
-    ├── .vscode/
-    │   └── launch.json           # F5 → Extension Development Host
-    └── package.json
+├── docs/
+│   └── dlw-hackathon.md     ← hackathon submission documentation
+│
+└── README.md
 ```
 
 ---
 
-## Agent Summary
+## How to Run
 
-| Agent | Default model | Role | Key output fields |
-|-------|----------------|------|-------------------|
-| **builder** | gpt-5-codex | Code context provider + challenge responder | `codeContext`, `respondToChallenge()` |
-| **factchecker** | gpt-5-codex | Inline comment accuracy + external doc accuracy | `claim`, `reality`, `codeSnippet`, `docSource`, `docSection`, `docPage` |
-| **attacker** | gpt-5-codex (static), gpt-5.1-codex-mini (PoC) | Security vulnerability scan + PoC execution | `cwe`, `attackVector`, `impact`, `exploitProof.confirmed` |
-| **skeptic** | — (no LLM) | Shadow execution + test suite runner + flow graph | `evidence` (4 chart datasets), `flow`, `confidence` |
-| **orchestrator** | — | 5-phase pipeline controller | `verdict`, `score`, `prioritizedFindings`, `challengeResponses` |
-
-**Default models** are Codex (Responses API). Override via `.env`: `BUILDER_MODEL`, `FACTCHECKER_MODEL`, `ATTACKER_MODEL`, `ATTACKER_POC_MODEL` (e.g. `gpt-4o` / `gpt-4o-mini` for Chat Completions if you don't have Codex access).
-
----
-
-## Getting Started
-
-### 1. Backend
+### Step 1 — Start the backend
 
 ```bash
 cd backend
-cp .env.example .env
-# Edit .env and set OPENAI_API_KEY=sk-... (required)
+cp .env.example .env      # fill in OPENAI_API_KEY
 npm install
-npm start
-# Or: node index.js
+node index.js             # listens on http://localhost:3001
 ```
 
-- Server listens on `http://localhost:3001` (or the next free port 3002, 3003, … if 3001 is in use).
-- Open `http://localhost:3001` in a browser for a short API overview; `http://localhost:3001/health` returns `{"status":"ok"}`.
-- **Default models** (no extra env needed): **Codex** — Builder and Attacker static use **gpt-5-codex**; Factchecker uses **gpt-5-codex**; Attacker PoC uses **gpt-5.1-codex-mini**. All use the Responses API. If your account has no Codex access, set `BUILDER_MODEL=gpt-4o`, `FACTCHECKER_MODEL=gpt-4o-mini`, `ATTACKER_MODEL=gpt-4o`, `ATTACKER_POC_MODEL=gpt-4o-mini` in `.env` to use Chat Completions instead.
+Backend API endpoints:
 
-### 2. Frontend (VS Code Extension)
-
-```bash
-cd frontend
-# Open the frontend folder in VS Code (File → Open Folder → frontend)
-# Press F5 to launch the Extension Development Host
-# A new VS Code window opens — use the extension in that window
-```
-
-In the Extension Development Host window, use the Code Review sidebar (shield icon) or Ctrl+Shift+P → "Code Review: …".
-
-**Backend URL setting:** The extension defaults to `http://127.0.0.1:3001`. If the backend runs on another port, set **Settings → codeReview.backendUrl** (e.g. `http://127.0.0.1:3002`). Use `127.0.0.1` rather than `localhost` to avoid IPv4/IPv6 resolution issues on Windows.
-
----
-
-## VS Code Commands
-
-| Command | How to trigger | What it does |
+| Endpoint | Method | Purpose |
 |---|---|---|
-| `Code Review: Review Current File` | Ctrl+Shift+P / right-click | Stepped review with 3 human checkpoints — Builder → Factchecker → Attacker → optional Skeptic |
-| `Code Review: Review Selection` | Right-click (text selected) | Same stepped flow for highlighted code only |
-| `Code Review: Review File with Docs` | Ctrl+Shift+P / right-click | Stepped review; opens file picker to select `.md/.txt/.rst/.adoc/.html` docs → factchecker runs a second pass comparing those docs against the code |
-| `Code Review: Show Findings` | Ctrl+Shift+P | Opens/reveals findings webview |
-| `Code Review: Show Skeptic Charts` | Ctrl+Shift+P | Opens/reveals charts webview |
+| `/review/start` | POST | Run Parser + Reasoner, open session |
+| `/review/next` | POST | Run `factchecker`, `attacker`, or `skeptic` |
+| `/review/finalize` | POST | Compute final verdict from collected results |
+| `/review` | POST | Single-shot full pipeline (backwards-compatible) |
+| `/health` | GET | Liveness check |
 
-**Settings:**
+### Step 2 — Launch the extension
 
-| Key | Default | Description |
-|---|---|---|
-| `codeReview.backendUrl`       | `http://127.0.0.1:3001` | Backend server URL. Use `127.0.0.1` not `localhost` on Windows. |
-| `codeReview.autoReviewOnSave` | `false` | Auto-review on every file save — uses single-shot `/review` endpoint (no checkpoints, silent) |
+Open the **`RunChecks/` root folder** in VS Code (not the `frontend/` subfolder), then press **F5**.
 
----
+VS Code will:
+1. Run `npm run compile` inside `frontend/` automatically (webpack bundles TypeScript)
+2. Open the **Extension Development Host** with RunChecks installed
 
-## Factchecker — Two Passes
+> First launch only: `cd frontend && npm install` before pressing F5 if you haven't installed devDependencies yet.
 
-### Pass 1: Inline comments (always runs)
-Checks every comment, docstring, and JSDoc inside the code file against what the code actually does. Each finding includes:
-- `line` — line number where the mismatch appears
-- `codeSnippet` — the exact comment or code line that is wrong
+### Step 3 — Use RunChecks
 
-### Pass 2: External documentation (only with "Review File with Docs")
-Accepts one or more external documents (README, API spec, design doc, changelog, etc.) and checks whether their claims match the actual implementation. Each finding includes:
-- `docSource` — filename of the document that raised the finding
-- `docSection` — section heading within the document (e.g. `"## Installation"`)
-- `docPage` — page number for paginated docs (PDF), or `null`
+| Action | How |
+|---|---|
+| Review selected code | Highlight code → right-click → **🔍 Run RunChecks Review** |
+| Review entire file | `Ctrl+Shift+P` → **🔍 Run RunChecks Review** (no selection) |
+| Upload reference docs | `Ctrl+Shift+P` → **RunChecks: Setup & Documents** |
+| Show agent pipeline | Click the **shield icon** in the activity bar |
 
-```
-Finding example (doc review):
-  Agent:      factchecker
-  Doc:        README.md
-  Section:    ## Sorting
-  Claim:      "Returns results sorted by date descending"
-  Reality:    "Results are returned in insertion order, no sorting applied"
-  Suggest:    "Either sort the results before returning or update the README"
-```
+**Review flow (human-in-the-loop):**
 
----
+1. Review starts → backend runs Parser + Reasoner automatically
+2. VS Code notification: **"Pre-processing complete. Run Fact Checker?"** → click to continue
+3. Fact Checker runs → **FindingsPanel** opens with results
+4. Click **✅ Approve & Continue** → Attacker runs → FindingsPanel updates
+5. Click **✅ Approve & Continue** → modal asks: **"Run Skeptic"** or **"Finalize Now"**
+6. (Optional) Skeptic runs → **SkepticPanel** opens with test/traffic/latency data
+7. Click **✅ Approve** → final verdict notification (`APPROVE / REQUEST CHANGES / BLOCK` + score)
 
-## API Reference
-
-| Endpoint | Method | Body | Purpose |
-|---|---|---|---|
-| `/review/start`    | POST | `{ code, filePath, language, workspaceRoot?, docs? }` | Step 1 — Run Builder, open session |
-| `/review/next`     | POST | `{ sessionId, agent }` | Step 2/3/4 — Run factchecker, attacker, or skeptic |
-| `/review/finalize` | POST | `{ sessionId }` | Final — Orchestrate all collected results → verdict |
-| `/review`          | POST | see below | Single-shot full pipeline (auto-save, backwards compat) |
-| `/decision`        | POST | `{ logId, decision }` | Record human accept/reject/defer |
-| `/health`          | GET  | — | Liveness check |
-
-**Stepped flow agent values for `/review/next`:** `"factchecker"` → `"attacker"` → `"skeptic"` (skeptic is optional)
-
-### POST /review — request body
-
-```json
-{
-  "code":          "string  (required)",
-  "filePath":      "string  (required)",
-  "language":      "string  (optional — auto-detected from extension)",
-  "workspaceRoot": "string  (optional — enables skeptic test suite runner)",
-  "diff":          "string  (optional — unified diff for context)",
-  "docs": [
-    { "name": "README.md",  "content": "..." },
-    { "name": "API_SPEC.md","content": "..." }
-  ]
-}
-```
-
-### POST /review — response shape
-
-```json
-{
-  "agent":   "orchestrator",
-  "verdict": "approve | request-changes | block",
-  "score":   85,
-  "agentStatuses": {
-    "builder": "pass", "factchecker": "warn", "attacker": "fail", "skeptic": "pass"
-  },
-  "prioritizedFindings": [
-    {
-      "source":      "factchecker",
-      "line":        null,
-      "type":        "issue",
-      "description": "README claims results are sorted but code returns them unsorted",
-      "severity":    "medium",
-      "claim":       "Returns results sorted by date descending",
-      "reality":     "Results returned in insertion order",
-      "suggestion":  "Sort results or update README",
-      "docSource":   "README.md",
-      "docSection":  "## Sorting"
-    },
-    {
-      "source":      "attacker",
-      "line":        42,
-      "type":        "SQL Injection",
-      "description": "User input concatenated directly into SQL query",
-      "severity":    "critical",
-      "cwe":         "89",
-      "attackVector":"network",
-      "impact":      "Full database read/write access",
-      "suggestion":  "Use parameterised queries",
-      "exploitProof":{ "confirmed": true, "output": "CONFIRMED\n..." },
-      "challengeResponse": {
-        "assessment":  "acknowledged",
-        "explanation": "Builder confirms unvalidated input reaches the query",
-        "proposedFix": "db.query('SELECT * FROM users WHERE id = ?', [id])"
-      }
-    }
-  ],
-  "challengeResponses": [ { "finding": {}, "response": {} } ],
-  "summary": "BLOCK — do not merge. Score: 50/100. 1 critical, 1 medium finding(s).",
-  "sessionId": "uuid"
-}
-```
+At any gate, **✏️ Request Changes** stops the pipeline so you can fix issues before re-running.
 
 ---
 
 ## Verdict & Scoring
 
-| Verdict | Condition |
+| Verdict | Trigger |
 |---|---|
-| `block`           | Any **critical** finding OR any confirmed PoC exploit |
-| `request-changes` | Any **high** finding OR attacker/factchecker status = `fail` |
-| `approve`         | Medium/low only, all agents `pass` or `warn` |
+| `APPROVE` | No high/critical findings, no confirmed PoC exploits |
+| `REQUEST CHANGES` | High-severity findings or agent-level failure |
+| `BLOCK` | Critical findings or PoC-confirmed exploit |
 
-**Score deductions** (from 100, floor 0):
+Score starts at **100** and deducts per finding:
 
 | Severity | Deduction |
 |---|---|
-| critical | −25 |
-| high | −15 |
-| medium | −5 |
-| low | −2 |
-| confirmed PoC exploit | −10 each (extra) |
+| Critical | −25 |
+| High | −15 |
+| Medium | −5 |
+| Low | −2 |
+| PoC-confirmed exploit | −10 each (additional) |
 
 ---
 
-## Data (SQLite — `backend/data/audit.db`)
+## Configuration
 
-| Table | Columns |
+| Setting | Default | Description |
+|---|---|---|
+| `runchecks.backendUrl` | `http://127.0.0.1:3001` | Backend server URL |
+
+Set in VS Code Settings (`Ctrl+,` → search `runchecks`).
+
+---
+
+## Environment Variables (`backend/.env`)
+
+```
+OPENAI_API_KEY=sk-...
+
+# Model overrides (all default to gpt-4o or gpt-4o-mini if unset)
+CODEX_MODEL=gpt-4o
+FACTCHECKER_MODEL=gpt-4o-mini
+ATTACKER_MODEL=gpt-4o
+PORT=3001
+```
+
+---
+
+## Tech Stack
+
+| Layer | Technology |
 |---|---|
-| `audit_log`       | id, timestamp, agent_name, findings (JSON), human_decision, session_id, file_path |
-| `document_chunks` | id, session_id, file_path, chunk_index, content, embedding (JSON) |
-
-Created automatically on first backend start. No setup required.
+| Backend | Node.js, Express, CommonJS |
+| LLM | OpenAI Responses API (Codex / gpt-4o) |
+| Embeddings | `text-embedding-3-small` |
+| Vector store | SQLite (cosine similarity, top-5 retrieval) |
+| Audit log | SQLite (`audit_log` table) |
+| Frontend | VS Code Extension API, TypeScript, webpack |
+| UI | VS Code Webview (CSP-safe, nonce-protected) |
+| Charts | Chart.js 4 (CDN, SkepticPanel only) |

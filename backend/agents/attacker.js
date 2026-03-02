@@ -31,6 +31,7 @@
 require('dotenv').config();
 const { complete }   = require('../core/llm');
 const { runSnippet } = require('../shadow/runner');
+const { trimCodeForPrompt } = require('../core/parser');
 
 // Default Codex (Responses API). Override with ATTACKER_MODEL / ATTACKER_POC_MODEL in .env for Chat Completions.
 const ATTACKER_MODEL     = process.env.ATTACKER_MODEL     || process.env.CODEX_MODEL || 'gpt-5-codex';
@@ -84,29 +85,101 @@ function normaliseFindings(raw) {
   }));
 }
 
+// minimal repair logic copied from builder to handle truncated JSON responses
+function repairTruncatedJson(raw) {
+  raw = raw.replace(/^```json?\s*/i, '').replace(/```\s*$/i, '').trim();
+  try { return JSON.parse(raw); } catch (_) {}
+  const first = raw.indexOf('{');
+  const last = raw.lastIndexOf('}');
+  if (first !== -1 && last > first) {
+    try { return JSON.parse(raw.slice(first, last + 1)); } catch (_) {}
+  }
+  let snippet = first !== -1 ? raw.slice(first) : raw;
+  const quoteCount = (snippet.match(/(?<!\\)"/g) || []).length;
+  if (quoteCount % 2 !== 0) snippet += '"';
+  const stack = [];
+  for (const ch of snippet) {
+    if (ch === '{' || ch === '[') stack.push(ch === '{' ? '}' : ']');
+    else if ((ch === '}' || ch === ']') && stack.length) stack.pop();
+  }
+  snippet += stack.reverse().join('');
+  try { return JSON.parse(snippet); } catch (_) {}
+  throw new Error('Unable to repair JSON');
+}
+
 // ─── Step 1: Static analysis ──────────────────────────────────────────────────
 
-async function staticAnalysis(code, filePath, language, builderContext) {
-  const userContent = [
-    builderContext ? `Context from builder: ${builderContext}\n\n` : '',
-    `File: ${filePath}\nLanguage: ${language}\n\n`,
-    `Code:\n\`\`\`\n${code}\n\`\`\`\n\n`,
-    'Find all security vulnerabilities. Output JSON only.',
-  ].join('');
+async function staticAnalysis(code, filePath, language, builderContext, allowChunk = true) {
+  // internal helper that actually calls the model and repairs JSON
+  const perform = async (src) => {
+    const promptCode = trimCodeForPrompt(src, 12000);
+    if (promptCode !== src) {
+      console.warn(
+        `[attacker] trimming code from ${src.length} to ${promptCode.length} chars for static analysis`
+      );
+    }
+    const userContent = [
+      builderContext ? `Context from builder: ${builderContext}\n\n` : '',
+      `File: ${filePath}\nLanguage: ${language}\n\n`,
+      `Code:\n\`\`\`\n${promptCode}\n\`\`\`\n\n`,
+      'Find all security vulnerabilities. Output JSON only.',
+    ].join('');
 
-  const raw    = (await complete({
-    model: ATTACKER_MODEL,
-    system: STATIC_SYSTEM,
-    user: userContent,
-    temperature: 0.1,
-    max_tokens: 2048,
-    jsonMode: true,
-  })) || '{}';
-  const parsed = JSON.parse(raw);
-  return {
-    findings: normaliseFindings(parsed.findings),
-    summary:  typeof parsed.summary === 'string' ? parsed.summary : 'Attacker: analysis complete.',
+    const raw = (await complete({
+      model: ATTACKER_MODEL,
+      system: STATIC_SYSTEM,
+      user: userContent,
+      temperature: 0.1,
+      max_tokens: 2048,
+      jsonMode: false, // we'll handle JSON ourselves so we can repair if needed
+    })) || '{}';
+
+    let parsed;
+    try {
+      parsed = JSON.parse(raw);
+    } catch (_) {
+      parsed = repairTruncatedJson(raw);
+    }
+
+    return {
+      findings: normaliseFindings(parsed.findings),
+      summary:  typeof parsed.summary === 'string' ? parsed.summary : 'Attacker: analysis complete.',
+    };
   };
+
+  try {
+    return await perform(code);
+  } catch (err) {
+    console.error('[attacker] static analysis error:', err.message);
+    if (allowChunk && code.length > 4000) {
+      console.warn('[attacker] falling back to chunked static analysis');
+      const mid = Math.floor(code.length / 2);
+      const splitPos = code.lastIndexOf('\n', mid) || mid;
+      const left = code.slice(0, splitPos);
+      const right = code.slice(splitPos);
+      let leftRes = { findings: [], summary: '' };
+      let rightRes = { findings: [], summary: '' };
+      try {
+        leftRes = await staticAnalysis(left, filePath, language, builderContext, false);
+      } catch (e) {
+        console.error('[attacker] chunk-left failure:', e.message);
+      }
+      try {
+        rightRes = await staticAnalysis(right, filePath, language, builderContext, false);
+      } catch (e) {
+        console.error('[attacker] chunk-right failure:', e.message);
+      }
+      const leftLines = left.split('\n').length;
+      rightRes.findings.forEach(f => {
+        if (typeof f.line === 'number') f.line += leftLines;
+      });
+      return {
+        findings: leftRes.findings.concat(rightRes.findings),
+        summary: `${leftRes.summary}${leftRes.summary && rightRes.summary ? ' | ' : ''}${rightRes.summary}`,
+      };
+    }
+    throw err;
+  }
 }
 
 // ─── Step 2: PoC generation ───────────────────────────────────────────────────
@@ -168,12 +241,20 @@ async function run(payload) {
     ({ findings, summary } = await staticAnalysis(code, filePath, language, builderContext));
   } catch (err) {
     console.error('[attacker] static analysis error:', err.message);
-    return {
-      agent:    'attacker',
-      status:   'warn',
-      findings: [],
-      summary:  `Attacker static analysis failed: ${err.message}`,
-    };
+    // retry with trimmed code to salvage something
+    try {
+      const trimmed = trimCodeForPrompt(code, 4000);
+      console.warn('[attacker] retrying static analysis with trimmed code');
+      ({ findings, summary } = await staticAnalysis(trimmed, filePath, language, builderContext));
+      summary += ' (partial: original code trimmed due to length)';
+    } catch (err2) {
+      return {
+        agent:    'attacker',
+        status:   'warn',
+        findings: [],
+        summary:  `Attacker static analysis failed: ${err2.message}`,
+      };
+    }
   }
 
   // ── Steps 2 + 3: PoC generation + execution (high/critical only) ──────────

@@ -54,4 +54,16 @@ function buildReviewPayload(code, filePath, diff = null) {
   };
 }
 
-module.exports = { chunkCode, detectLanguage, buildReviewPayload };
+// utility exported here for convenience; trimming is also used by agents directly
+function trimCodeForPrompt(code, maxChars = 12000) {
+  if (!code || code.length <= maxChars) return code;
+  const half = Math.floor(maxChars / 2);
+  const omitted = code.length - maxChars;
+  return (
+    code.slice(0, half) +
+    `\n...<CODE OMITTED: ${omitted} chars>...\n` +
+    code.slice(-half)
+  );
+}
+
+module.exports = { chunkCode, detectLanguage, buildReviewPayload, trimCodeForPrompt };

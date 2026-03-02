@@ -67,6 +67,34 @@ async function run() {
     console.log('Challenge response:', JSON.stringify(challengeResponse, null, 2).slice(0, 500) + '…');
   }
 
+  // run again on testcasefile.py if it exists
+  try {
+    const path = require('path');
+    const fs = require('fs');
+    const largePath = path.resolve(__dirname, 'testcasefile.py');
+    if (fs.existsSync(largePath)) {
+      console.log('\n=== Builder test on testcasefile.py ===');
+      const code = fs.readFileSync(largePath, 'utf8');
+
+      const largeResult = await builder.run({ code, filePath: 'testcasefile.py', language: 'python' });
+      console.log('Builder large-file status:', largeResult.status, 'findings:', largeResult.findings.length);
+
+      // also run factchecker and attacker for completeness
+      const factchecker = require('./agents/factchecker');
+      const attacker = require('./agents/attacker');
+
+      console.log('Running factchecker on large file...');
+      const factRes = await factchecker.run({ code, filePath: 'testcasefile.py', language: 'python' });
+      console.log('Factchecker status:', factRes.status, 'findings:', factRes.findings.length);
+
+      console.log('Running attacker on large file...');
+      const attackRes = await attacker.run({ code, filePath: 'testcasefile.py', language: 'python' });
+      console.log('Attacker status:', attackRes.status, 'findings:', attackRes.findings.length);
+    }
+  } catch (e) {
+    console.warn('Could not run large-file test:', e.message);
+  }
+
   console.log('\n=== Builder test completed ===');
 }
 

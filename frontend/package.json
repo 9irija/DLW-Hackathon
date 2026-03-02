@@ -1,48 +1,55 @@
 {
-  "name": "code-review-extension",
-  "displayName": "Multi-Agent Code Review",
-  "description": "AI-powered multi-agent code review using OpenAI",
-  "version": "0.0.1",
+  "name": "runchecks",
+  "displayName": "RunChecks",
+  "description": "AI-powered multi-agent code review — human-gated HITL pipeline",
+  "version": "0.1.0",
   "publisher": "your-publisher-name",
   "engines": { "vscode": "^1.85.0" },
   "categories": ["Linters", "Other"],
   "activationEvents": ["onStartupFinished"],
-  "main": "./src/extension.js",
+  "main": "./out/extension.js",
   "contributes": {
     "commands": [
-      { "command": "codeReview.reviewFile",      "title": "Review Current File",        "category": "Code Review" },
-      { "command": "codeReview.reviewSelection", "title": "Review Selection",            "category": "Code Review" },
-      { "command": "codeReview.reviewWithDocs",  "title": "Review File with Docs",       "category": "Code Review" },
-      { "command": "codeReview.showFindings",    "title": "Show Findings",               "category": "Code Review" },
-      { "command": "codeReview.showCharts",      "title": "Show Skeptic Charts",         "category": "Code Review" }
+      { "command": "runchecks.startReview", "title": "🔍 Run RunChecks Review", "category": "RunChecks" },
+      { "command": "runchecks.openSetup",   "title": "Setup & Documents",        "category": "RunChecks" },
+      { "command": "runchecks.showStatus",  "title": "Show Agent Pipeline",      "category": "RunChecks" },
+      { "command": "codeReview.reviewFile",      "title": "Review Current File",  "category": "Code Review" },
+      { "command": "codeReview.reviewSelection", "title": "Review Selection",     "category": "Code Review" },
+      { "command": "codeReview.reviewWithDocs",  "title": "Review File with Docs","category": "Code Review" },
+      { "command": "codeReview.showFindings",    "title": "Show Findings",        "category": "Code Review" },
+      { "command": "codeReview.showCharts",      "title": "Show Skeptic Charts",  "category": "Code Review" }
     ],
     "viewsContainers": {
-      "activitybar": [{ "id": "codeReview", "title": "Code Review", "icon": "$(shield)" }]
+      "activitybar": [{ "id": "runchecks", "title": "RunChecks", "icon": "media/icon.svg" }]
     },
     "views": {
-      "codeReview": [
-        { "id": "codeReview.agentStatus", "name": "Agent Status" },
-        { "id": "codeReview.findings",    "name": "Findings"      },
-        { "id": "codeReview.verdict",     "name": "Verdict"       }
+      "runchecks": [
+        { "type": "webview", "id": "runchecks.agentStatus", "name": "Agent Pipeline" }
       ]
     },
     "configuration": {
-      "title": "Multi-Agent Code Review",
+      "title": "RunChecks",
       "properties": {
+        "runchecks.backendUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:3001",
+          "description": "RunChecks backend URL. Use 127.0.0.1 (not localhost) on Windows."
+        },
         "codeReview.backendUrl": {
           "type": "string",
           "default": "http://127.0.0.1:3001",
-          "description": "URL of the code review backend server. Use 127.0.0.1 (not localhost) to avoid IPv6 resolution issues on Windows."
+          "description": "Backend URL (legacy setting, kept for compatibility)."
         },
         "codeReview.autoReviewOnSave": {
           "type": "boolean",
           "default": false,
-          "description": "Automatically trigger a review when a file is saved"
+          "description": "Auto-review on file save (single-shot, no checkpoints)"
         }
       }
     },
     "menus": {
       "editor/context": [
+        { "command": "runchecks.startReview",      "group": "runchecks" },
         { "command": "codeReview.reviewFile",      "group": "codeReview" },
         { "command": "codeReview.reviewSelection", "group": "codeReview", "when": "editorHasSelection" },
         { "command": "codeReview.reviewWithDocs",  "group": "codeReview" }
@@ -50,10 +57,18 @@
     }
   },
   "scripts": {
+    "compile": "webpack",
+    "watch":   "webpack --watch",
     "package": "vsce package",
     "publish": "vsce publish"
   },
   "devDependencies": {
-    "@vscode/vsce": "^2.24.0"
+    "@types/node":    "^20.0.0",
+    "@types/vscode":  "^1.85.0",
+    "@vscode/vsce":   "^2.24.0",
+    "ts-loader":      "^9.5.0",
+    "typescript":     "^5.3.0",
+    "webpack":        "^5.89.0",
+    "webpack-cli":    "^5.1.0"
   }
 }
