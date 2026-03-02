@@ -1,20 +1,18 @@
 /**
- * builder — Codex Integration & Code Context Provider
+ * reasoner — formerly the "Builder" agent, now focused on understanding
+ * parsed code and producing CodeContext for downstream reviewers.
  *
- * Role: Orchestrator → [Builder] → Fact Checker → Attacker → Skeptic
+ * Role: Parser → [Reasoner] → Fact Checker → Attacker → Skeptic
  *
  * Responsibilities:
- *   1. Accept code submission and use OpenAI to analyse intent, structure, dependencies
- *   2. Return CodeContext for downstream agents
- *   3. respondToChallenge when Fact Checker / Attacker flag issues tracing to Builder
+ *   1. Accept either raw code or a parsed structure from the Parser agent.
+ *   2. Analyse intent, entry points, dependencies, data flows, and risks.
+ *   3. Return a CodeContext object that the Fact Checker and others can use.
  *
  * Output (run): { agent, status, findings, summary, codeContext }
  * CodeContext: { submissionId, language, intent, entryPoints, dependencies, externalCalls,
  *               sideEffects, dataFlows, potentialRisks, rawCode, lineRange }
  */
-
-const parser = require('./parser');
-const reasoner = require('./reasoner');
 
 const crypto = require('crypto');
 const fs = require('fs');
@@ -23,15 +21,16 @@ require('dotenv').config();
 const { complete } = require('../core/llm');
 const { trimCodeForPrompt } = require('../core/parser');
 
-// Default Codex (Responses API). Override with BUILDER_MODEL in .env to use Chat Completions (e.g. gpt-4o).
-const BUILDER_MODEL = process.env.CODEX_MODEL || process.env.BUILDER_MODEL || 'gpt-5-codex';
+// model choices mirror the old builder config
+const REASONER_MODEL = process.env.CODEX_MODEL || process.env.REASONER_MODEL || 'gpt-5-codex';
 
-const BUILDER_SYSTEM_PROMPT = `You are the Builder Agent in a multi-agent AI code review system embedded in VS Code.
+const REASONER_SYSTEM_PROMPT = `You are the Reasoner Agent in a multi-agent AI code review system embedded in VS Code.
 
 Your job is to be the definitive context provider for every other agent in the pipeline.
-When given a code snippet you must analyse it deeply and return a structured JSON object
-called CodeContext. You are held accountable: if downstream agents (Fact Checker, Attacker)
-surface contradictions or violations in your output, you will be asked to respond.
+When given code (or a set of parsed segments produced by a preprocessing step) you must
+analyse it deeply and return a structured JSON object called CodeContext.  You are held
+accountable: if downstream agents (Fact Checker, Attacker) surface contradictions or
+violations in your output, you will be asked to respond.
 
 ─── YOUR ANALYSIS MUST COVER ────────────────────────────────────────────────
 
@@ -47,6 +46,10 @@ surface contradictions or violations in your output, you will be asked to respon
                    Trace user input through to outputs/storage.
 8. POTENTIAL RISKS — Your own preliminary flags: unvalidated inputs, hardcoded
                      secrets, unsafe operations, missing error handling, etc.
+
+When parsing instructions you may leverage the provided "parsed" information to
+bias your thinking (e.g. the results of an earlier Parser run).  However the output
+must still describe the entire submission, not just a single segment.
 
 ─── OUTPUT FORMAT ───────────────────────────────────────────────────────────
 
@@ -83,68 +86,51 @@ traces back to your analysis, you will receive a CHALLENGE message. Respond with
 }
 `;
 
-/**
- * Attempt to parse potentially truncated/malformed JSON from the LLM.
- * Tries progressively more aggressive repair strategies before giving up.
- * @param {string} raw
- * @returns {object|null}
- */
 function repairTruncatedJson(raw) {
-  // 1. Strip markdown fences if present
   raw = raw.replace(/^```json?\s*/i, '').replace(/```\s*$/, '').trim();
-
-  // 2. Straightforward parse
   try { return JSON.parse(raw); } catch (_) {}
-
-  // 3. Extract outermost { ... }
   const first = raw.indexOf('{');
   const last  = raw.lastIndexOf('}');
   if (first !== -1 && last > first) {
     try { return JSON.parse(raw.slice(first, last + 1)); } catch (_) {}
   }
-
-  // 4. Response was truncated mid-JSON — close all open structures
   let snippet = first !== -1 ? raw.slice(first) : raw;
-
-  // Close any open string (odd number of unescaped quotes)
   const quoteCount = (snippet.match(/"(?!\\)/g) || []).length;
   if (quoteCount % 2 !== 0) snippet += '"';
-
-  // Close open arrays/objects by walking the bracket stack
   const stack = [];
   for (const ch of snippet) {
     if (ch === '{' || ch === '[') stack.push(ch === '{' ? '}' : ']');
     else if ((ch === '}' || ch === ']') && stack.length) stack.pop();
   }
   snippet += stack.reverse().join('');
-
   try { return JSON.parse(snippet); } catch (_) {}
-
-  return null; // all strategies exhausted
+  return null;
 }
 
-/**
- * Analyse code and return CodeContext.
- * @param {object} submission - { code, filePath?, lineStart?, lineEnd? }
- * @returns {Promise<object>} CodeContext
- */
-// NOTE: analyseCode is still exported for legacy callers but the new
-// architecture routes analysis through the Parser -> Reasoner pipeline.
 async function analyseCode(submission) {
-  const { code, filePath = 'unknown', lineStart = 0, lineEnd = 0 } = submission;
+  // submission: { code, filePath?, lineStart?, lineEnd?, parsed? }
+  const { code, filePath = 'unknown', lineStart = 0, lineEnd = 0, parsed } = submission;
   const submissionId = crypto.randomUUID();
 
-  // trim the code if it's extremely long to avoid blowing past model token limits
   let promptCode = trimCodeForPrompt(code, 12000);
   if (promptCode !== code) {
     console.warn(
-      `[builder] code length ${code.length} exceeds threshold; trimming for prompt`
+      `[reasoner] code length ${code.length} exceeds threshold; trimming for prompt`
     );
   }
 
   const fence = '```';
   const hyphen = '-';
   const userMessageLines = [];
+
+  if (parsed && Array.isArray(parsed) && parsed.length) {
+    userMessageLines.push('PARSED SEGMENTS:');
+    parsed.forEach((seg, idx) => {
+      userMessageLines.push(`  [${idx}] lines ${seg.lineStart}-${seg.lineEnd}`);
+    });
+    userMessageLines.push('');
+  }
+
   userMessageLines.push('SUBMISSION ID: ' + submissionId);
   userMessageLines.push('FILE: ' + filePath);
   userMessageLines.push('LINES: ' + lineStart + hyphen + lineEnd);
@@ -173,8 +159,8 @@ async function analyseCode(submission) {
 
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     raw = await complete({
-      model: BUILDER_MODEL,
-      system: BUILDER_SYSTEM_PROMPT,
+      model: REASONER_MODEL,
+      system: REASONER_SYSTEM_PROMPT,
       user: attempt === 1
         ? userMessage
         : userMessage + '\n\nNOTE: Your previous response was truncated or invalid JSON. Reply with compact JSON only — no prose, no markdown.',
@@ -187,12 +173,10 @@ async function analyseCode(submission) {
     if (codeContext) break;
 
     if (attempt === MAX_ATTEMPTS) {
-      throw new Error(`Builder Agent: Failed to parse CodeContext JSON after ${MAX_ATTEMPTS} attempts.\nRaw response:\n${raw}`);
+      throw new Error(`Reasoner Agent: Failed to parse CodeContext JSON after ${MAX_ATTEMPTS} attempts.\nRaw response:\n${raw}`);
     }
-    // otherwise loop to retry
   }
 
-  // Always inject these server-side — never trust the model to reproduce them correctly
   codeContext.submissionId = submissionId;
   codeContext.rawCode = code;
   codeContext.lineRange = { file: filePath, start: lineStart, end: lineEnd };
@@ -200,14 +184,7 @@ async function analyseCode(submission) {
   return codeContext;
 }
 
-/**
- * Respond when Fact Checker or Attacker flags an issue that implicates Builder's analysis.
- * @param {object} codeContext - from analyseCode()
- * @param {object} challenge - { agentName, finding, severity }
- * @returns {Promise<object>} challengeResponse
- */
 async function respondToChallenge(codeContext, challenge) {
-  // Omit rawCode from the context sent back to the model to avoid token bloat
   const { rawCode: _omit, ...contextForPrompt } = codeContext;
 
   const challengeMessage = `
@@ -226,8 +203,8 @@ Output ONLY raw JSON, no markdown fences, no explanation.
 `;
 
   const raw = await complete({
-    model: BUILDER_MODEL,
-    system: BUILDER_SYSTEM_PROMPT,
+    model: REASONER_MODEL,
+    system: REASONER_SYSTEM_PROMPT,
     user: challengeMessage,
     temperature: 0.1,
     max_tokens: 2048,
@@ -236,18 +213,11 @@ Output ONLY raw JSON, no markdown fences, no explanation.
 
   const challengeResponse = repairTruncatedJson(raw);
   if (!challengeResponse) {
-    throw new Error(`Builder Agent: Failed to parse challengeResponse JSON.\nRaw response:\n${raw}`);
+    throw new Error(`Reasoner Agent: Failed to parse challengeResponse JSON.\nRaw response:\n${raw}`);
   }
   return challengeResponse;
 }
 
-/**
- * Load a line range from a file (for Orchestrator to use before calling analyseCode).
- * @param {string} filePath - absolute or workspace-relative path
- * @param {number} lineStart - 1-indexed
- * @param {number} lineEnd - 1-indexed inclusive
- * @returns {{ code: string, filePath: string, lineStart: number, lineEnd: number }}
- */
 function loadFileRange(filePath, lineStart, lineEnd) {
   const absolutePath = path.resolve(filePath);
   const fileContent = fs.readFileSync(absolutePath, 'utf8');
@@ -257,41 +227,52 @@ function loadFileRange(filePath, lineStart, lineEnd) {
   return { code, filePath, lineStart, lineEnd };
 }
 
-/**
- * Agent entry: run(payload) for pipeline. Analyses code by first
- * passing it through the Parser and then the Reasoner, returns agent result
- * + codeContext.
- * @param {object} payload - { code, filePath, language?, lineStart?, lineEnd?, ... }
- * @returns {Promise<object>} { agent, status, findings, summary, codeContext }
- */
 async function run(payload) {
-  // run parser first
-  let parserResult;
+  const { code, filePath, language, parsed } = payload;
+  const lineStart = payload.lineStart ?? 0;
+  const lineEnd = payload.lineEnd ?? 0;
+
+  let codeContext;
   try {
-    parserResult = await parser.run(payload);
+    codeContext = await analyseCode({
+      code,
+      filePath: filePath || 'unknown',
+      lineStart,
+      lineEnd,
+      parsed,
+    });
   } catch (err) {
-    parserResult = { agent: 'parser', status: 'fail', parsed: [], findings: [], summary: err.message };
+    console.error('[reasoner] analyseCode error, retrying with trimmed code:', err.message);
+    try {
+      const trimmedCode = trimCodeForPrompt(code, 4000);
+      codeContext = await analyseCode({
+        code: trimmedCode,
+        filePath: filePath || 'unknown',
+        lineStart,
+        lineEnd,
+        parsed,
+      });
+      codeContext.intent = (codeContext.intent || '') +
+        ' (partial: original code was too large)';
+    } catch (err2) {
+      return {
+        agent: 'reasoner',
+        status: 'fail',
+        findings: [{
+          line: undefined,
+          category: 'reasoner-error',
+          description: err2.message,
+          severity: 'high',
+          suggestion: 'Check code and retry.',
+        }],
+        summary: `Reasoner analysis failed: ${err2.message}`,
+        codeContext: null,
+      };
+    }
   }
 
-  // prepare payload for reasoner
-  const reasonerPayload = { ...payload, parsed: parserResult.parsed || [] };
-  let reasonerResult;
-  try {
-    reasonerResult = await reasoner.run(reasonerPayload);
-  } catch (err) {
-    reasonerResult = {
-      agent: 'reasoner',
-      status: 'fail',
-      findings: [],
-      summary: err.message,
-      codeContext: null,
-    };
-  }
-
-  // unify into builder-style response
-  const codeContext = reasonerResult.codeContext;
-  const potentialRisks = codeContext?.potentialRisks || [];
-  const riskFindings = potentialRisks.map((risk) => ({
+  const potentialRisks = codeContext.potentialRisks || [];
+  const findings = potentialRisks.map((risk) => ({
     line: codeContext.lineRange?.start,
     category: 'potential-risk',
     description: typeof risk === 'string' ? risk : String(risk),
@@ -299,19 +280,17 @@ async function run(payload) {
     suggestion: 'Review and address before merge.',
   }));
 
-  const hasHigh = riskFindings.some((f) => f.severity === 'high');
-  const hasMedium = riskFindings.length > 0;
+  const hasHigh = findings.some((f) => f.severity === 'high');
+  const hasMedium = findings.length > 0;
   const status = hasHigh ? 'fail' : hasMedium ? 'warn' : 'pass';
-
-  const summaries = [];
-  if (parserResult.summary) summaries.push(`[parser] ${parserResult.summary}`);
-  if (reasonerResult.summary) summaries.push(`[reasoner] ${reasonerResult.summary}`);
-  const summary = summaries.join(' | ') || 'Builder pipeline complete.';
+  const summary = codeContext.intent
+    ? `Reasoner: ${codeContext.intent.slice(0, 120)}${codeContext.intent.length > 120 ? '…' : ''}`
+    : 'Reasoner analysis complete; code context ready for downstream agents.';
 
   return {
-    agent: 'builder',
+    agent: 'reasoner',
     status,
-    findings: riskFindings,
+    findings,
     summary,
     codeContext,
   };

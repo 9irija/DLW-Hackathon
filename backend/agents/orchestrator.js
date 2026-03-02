@@ -4,11 +4,23 @@ const builderAgent = require('./builder');
 const factchecker = require('./factchecker');
 const attacker = require('./attacker');
 const skeptic = require('./skeptic');
+// auxiliary agents exposed for debugging and testing
+const parser = require('./parser');
+const reasoner = require('./reasoner');
+const docreader = require('./docreader');
 
 const SEVERITY_RANK = { critical: 4, high: 3, medium: 2, low: 1 };
 const SCORE_DEDUCTIONS = { critical: 25, high: 15, medium: 5, low: 2 };
 const AGENT_PRIORITY = { attacker: 4, skeptic: 3, factchecker: 2, builder: 1 };
-const AGENT_MODULES = { builder: builderAgent, factchecker, attacker, skeptic };
+const AGENT_MODULES = {
+  builder: builderAgent,
+  factchecker,
+  attacker,
+  skeptic,
+  parser,      // not run by default
+  reasoner,    // not run by default
+  docreader,   // not run by default
+};
 const AGENT_ORDER = ['builder', 'factchecker', 'attacker', 'skeptic'];
 
 function skippedResult(agentName, reason = 'Agent was not run in this review path.') {
