@@ -19,33 +19,44 @@
  *   summary: string
  * }
  */
+const MAX_SEGMENT_LINES = 80;
+const boundaryRegex = /^(?:\s*(?:\/\*\*|function\s|class\s|async function\s|export\b|(?:const|let|var)\s+\w+\s*=\s*(?:async\s+)?(?:function|\()))/;
 
 function splitByLogicalBoundaries(code) {
   const lines = String(code || '').split('\n');
   const segments = [];
   let start = 0;
 
-  const boundaryRegex = /^(?:\s*(?:function|class|async function|export\b))/;
+  const flush = (end) => {
+    if (end > start) {
+      segments.push({
+        snippet: lines.slice(start, end).join('\n'),
+        lineStart: start + 1,
+        lineEnd: end,
+      });
+      start = end;
+    }
+  };
 
   for (let i = 0; i < lines.length; i++) {
-    if (i > start && boundaryRegex.test(lines[i])) {
-      segments.push({
-        snippet: lines.slice(start, i).join('\n'),
-        lineStart: start + 1,
-        lineEnd: i,
-      });
-      start = i;
+    const tooLong = (i - start) >= MAX_SEGMENT_LINES;
+    const isBoundary = i > start && boundaryRegex.test(lines[i]);
+
+    if (isBoundary || tooLong) {
+      if (tooLong && !isBoundary) {
+        // try to find a nearby blank line to split at cleanly
+        let splitAt = i;
+        for (let j = i; j > start + MAX_SEGMENT_LINES * 0.6; j--) {
+          if (lines[j].trim() === '') { splitAt = j; break; }
+        }
+        flush(splitAt);
+      } else {
+        flush(i);
+      }
     }
   }
 
-  if (start < lines.length) {
-    segments.push({
-      snippet: lines.slice(start).join('\n'),
-      lineStart: start + 1,
-      lineEnd: lines.length,
-    });
-  }
-
+  flush(lines.length);
   return segments;
 }
 
