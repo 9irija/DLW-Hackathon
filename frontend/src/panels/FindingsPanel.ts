@@ -365,11 +365,13 @@ ${_commonStyles()}
     vscode.postMessage({ type: 'decision', stage: 'skeptic', decision: 'approve' });
   document.getElementById('changes-btn').onclick = () => {
     document.getElementById('footer').innerHTML =
-      '<div class="changes-msg">✏️ Changes requested — make your fixes then run RunChecks again.</div>';
+      '<div class="changes-msg">✏️ Make your changes, then run RunChecks again.</div>';
     vscode.postMessage({ type: 'decision', stage: 'skeptic', decision: 'change' });
   };
 
   if (hasTraffic) {
+    // Chart.js does not resolve CSS variables — read the actual computed colour at runtime
+    const fgColor = getComputedStyle(document.body).getPropertyValue('--vscode-foreground').trim() || '#cccccc';
     const ctx = document.getElementById('traffic-chart').getContext('2d');
     new Chart(ctx, {
       type: 'bar',
@@ -382,10 +384,10 @@ ${_commonStyles()}
       },
       options: {
         responsive: true, maintainAspectRatio: false,
-        plugins: { legend: { labels: { color: 'var(--vscode-foreground)' } } },
+        plugins: { legend: { labels: { color: fgColor } } },
         scales: {
-          x: { ticks: { color: 'var(--vscode-foreground)' }, grid: { color: 'rgba(128,128,128,0.15)' } },
-          y: { ticks: { color: 'var(--vscode-foreground)' }, grid: { color: 'rgba(128,128,128,0.15)' } }
+          x: { ticks: { color: fgColor }, grid: { color: 'rgba(128,128,128,0.15)' } },
+          y: { ticks: { color: fgColor }, grid: { color: 'rgba(128,128,128,0.15)' } }
         }
       }
     });
@@ -449,20 +451,10 @@ ${_commonStyles()}
           return orderedKeys.map(agentKey => {
             const agentFindings = byAgent.get(agentKey)!;
             const title = labels[agentKey] ?? (agentKey ? agentKey : 'Other');
-            const cards = agentFindings.map(f => {
-              const sev  = String(f['severity'] ?? 'low').toLowerCase();
-              // Prefer reality (factchecker mismatch text), then generic description, then claim
-              const desc = String(f['description'] ?? f['reality'] ?? f['claim'] ?? '');
-              const sugg = String(f['suggestion']  ?? '');
-              return `<div class="finding-card">
-  <div class="finding-header">
-    <span class="sev sev-${escHtml(sev)}">${escHtml(sev)}</span>
-    <span class="agent-chip">${escHtml(title)}</span>
-  </div>
-  <div class="finding-desc"><span class="label">Finding:</span> ${escHtml(desc)}</div>
-  ${sugg ? `<div class="finding-suggestion"><span class="label">💡 Suggestion:</span> ${escHtml(sugg)}</div>` : ''}
-</div>`;
-            }).join('');
+            // Reuse the same rich card format as the individual findings pages
+            const cards = agentFindings
+              .map(f => _findingCardHtml(_rawFindingToAgentFinding(f)))
+              .join('');
 
             return `<section class="agent-section">
   <h3 class="agent-section-title">${escHtml(title)} findings</h3>
@@ -522,6 +514,12 @@ ${_commonStyles()}
   const vscode = acquireVsCodeApi();
   document.getElementById('close-btn').onclick = () =>
     vscode.postMessage({ type: 'close' });
+
+  document.querySelectorAll('.file-link').forEach(el => {
+    el.addEventListener('click', () => {
+      vscode.postMessage({ type: 'jumpToLine', file: el.dataset.file, line: Number(el.dataset.line) });
+    });
+  });
 </script>
 </body>
 </html>`;
@@ -724,6 +722,28 @@ function _formatSummaryHtml(raw: string): string {
     return `<li>${escHtml(p)}</li>`;
   }).join('');
   return `<ul class="summary-lines">${items}</ul>`;
+}
+
+/**
+ * Convert a raw backend finding object (from prioritizedFindings) to an AgentFinding
+ * so the verdict page can reuse the same rich card renderers as the findings page.
+ */
+function _rawFindingToAgentFinding(f: Record<string, unknown>): AgentFinding {
+  const sev = String(f['severity'] ?? '').toLowerCase();
+  return {
+    type:        String(f['type']      ?? f['category']    ?? 'issue'),
+    severity:    (['critical','high','medium','low'].includes(sev) ? sev : 'low') as AgentFinding['severity'],
+    file:        String(f['filePath']  ?? f['file']        ?? ''),
+    line:        Number(f['line']      ?? 0),
+    description: String(f['description'] ?? f['reality']  ?? f['claim'] ?? ''),
+    suggestion:  String(f['suggestion'] ?? ''),
+    codeSnippet: f['codeSnippet'] ? String(f['codeSnippet']) : undefined,
+    claim:       f['claim']       ? String(f['claim'])       : undefined,
+    reality:     f['reality']     ? String(f['reality'])     : undefined,
+    docSource:   f['docSource']   ? String(f['docSource'])   : undefined,
+    docSection:  f['docSection']  ? String(f['docSection'])  : undefined,
+    docPage:     f['docPage'] != null ? Number(f['docPage']) : undefined,
+  };
 }
 
 /** Normalise backend verdict strings (lowercase/hyphenated) to display form. */
