@@ -71,14 +71,12 @@ The key feature of this extension is **three human checkpoints** built into the 
         ▼
 [Orchestrator — orchestrator.js]  (sole agent manager)
         │
-        ├─ PHASE 1 ── Builder (gpt-4o, sequential first)
+        ├─ startReview() ── Builder (gpt-4o, always first)
         │    Analyses intent, entry points, dependencies, data flows,
         │    external calls, side effects, and preliminary risks.
         │    → Produces codeContext used to enrich all downstream prompts.
         │
-        ├─ PHASE 2 ── Parallel agents (all receive enrichedPayload)
-        │    │
-        │    ├─ Factchecker (gpt-4o-mini) — TWO PASSES
+        ├─ runAgent('factchecker') ── Factchecker (gpt-4o-mini) — TWO PASSES
         │    │    Pass 1 — Inline: compares every comment/docstring in the
         │    │             code against what the code actually does.
         │    │             Findings tagged with line number.
@@ -87,7 +85,7 @@ The key feature of this extension is **three human checkpoints** built into the 
         │    │             against the actual implementation.
         │    │             Findings tagged with docSource (filename).
         │    │
-        │    ├─ Attacker (gpt-4o + gpt-4o-mini + shadow/runner)
+        ├─ runAgent('attacker') ── Attacker (gpt-4o + gpt-4o-mini + shadow/runner)
         │    │    Step 1 — Static scan (gpt-4o): finds vulnerabilities,
         │    │             maps to CWE IDs, rates severity, describes impact.
         │    │    Step 2 — PoC generation (gpt-5.1-codex-mini, high/critical only):

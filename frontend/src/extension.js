@@ -50,7 +50,7 @@ function postJson(pathname, payload, backendUrl) {
     );
 
     req.on('error', reject);
-    req.write(body);
+    req.write(bodyStr);
     req.end();
   });
 }
@@ -301,9 +301,7 @@ function activate(context) {
         }))
         .filter(d => d.content);
 
-      if (!docs.length) {
-        return vscode.window.showWarningMessage('Could not read selected document(s).');
-      }
+      if (!docs.length) return vscode.window.showWarningMessage('Could not read selected document(s).');
 
       await vscode.window.withProgress(
         {

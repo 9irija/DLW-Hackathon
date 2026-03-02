@@ -21,6 +21,28 @@ const SESSION_TTL_MS = 60 * 60 * 1000;
 
 app.use(express.json({ limit: '2mb' }));
 
+// In-memory session store for stepped reviews (keyed by sessionId)
+const sessions = new Map();
+
+// ─── Helper: build + embed payload ───────────────────────────────────────────
+
+async function buildPayload(code, filePath, diff, workspaceRoot, docs) {
+  const sessionId = crypto.randomUUID();
+  const payload   = buildReviewPayload(code, filePath, diff);
+  payload.sessionId = sessionId;
+  if (workspaceRoot) payload.workspaceRoot = workspaceRoot;
+  if (Array.isArray(docs) && docs.length) payload.docs = docs;
+
+  for (let i = 0; i < payload.chunks.length; i++) {
+    const embedding = await embed(payload.chunks[i]);
+    await storeChunk({ sessionId, filePath, chunkIndex: i, content: payload.chunks[i], embedding });
+  }
+  const queryEmbedding = await embed(code.slice(0, 500));
+  payload.context = await retrieveTopChunks(queryEmbedding, { sessionId, topK: 5 });
+
+  return payload;
+}
+
 function cleanupSessions() {
   const now = Date.now();
   for (const [sessionId, session] of REVIEW_SESSIONS.entries()) {

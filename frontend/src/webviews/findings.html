@@ -102,8 +102,13 @@
 
     const root = document.getElementById('root');
     if (reviewData && reviewData.verdict) {
+      // Final result — full orchestrated view
       root.innerHTML = '';
       renderPage(reviewData);
+    } else if (reviewData && reviewData.agentResults) {
+      // Intermediate stepped result — show per-agent findings collected so far
+      root.innerHTML = '';
+      renderIntermediate(reviewData);
     }
 
     function renderPage(d) {
@@ -230,6 +235,67 @@
 
       table.appendChild(tbody);
       root.appendChild(table);
+    }
+
+    // ── Intermediate stepped display ────────────────────────────────────────
+    function renderIntermediate(d) {
+      const agentResults = d.agentResults || {};
+      const agentOrder   = ['builder', 'factchecker', 'attacker', 'skeptic'];
+      const ran          = agentOrder.filter(a => agentResults[a]);
+
+      const header = document.createElement('div');
+      header.innerHTML =
+        `<h1>Review In Progress</h1>` +
+        `<p class="summary-text">Agents completed so far: <strong>${ran.join(' → ')}</strong>. ` +
+        `Respond to the checkpoint prompt to continue.</p>`;
+      root.appendChild(header);
+
+      let anyFindings = false;
+      ran.forEach(agentName => {
+        const result   = agentResults[agentName];
+        const findings = result?.findings || [];
+        if (!findings.length) return;
+        anyFindings = true;
+
+        const section = document.createElement('div');
+        section.style.cssText = 'margin-bottom:20px';
+
+        const icon = { pass: '✅', warn: '⚠️', fail: '❌', error: '🔴', skipped: '—' }[result.status] ?? '❓';
+        const heading = document.createElement('h2');
+        heading.style.cssText = 'font-size:0.95rem;margin:0 0 8px';
+        heading.innerHTML =
+          `<span class="source-chip src-${agentName}" style="font-size:0.8rem;padding:2px 8px">${agentName}</span>` +
+          ` ${icon} ${findings.length} finding(s)`;
+        section.appendChild(heading);
+
+        const table = document.createElement('table');
+        table.innerHTML = `<thead><tr>
+          <th>Line</th><th>Severity</th><th>Type</th><th>Description</th><th>Suggestion</th>
+        </tr></thead>`;
+        const tbody = document.createElement('tbody');
+
+        findings.forEach(f => {
+          const tr = document.createElement('tr');
+          tr.innerHTML =
+            `<td style="white-space:nowrap">${f.line ?? '—'}</td>` +
+            `<td class="sev-${f.severity ?? 'low'}" style="white-space:nowrap">${f.severity ?? ''}</td>` +
+            `<td style="white-space:nowrap">${escHtml(f.type ?? f.category ?? 'issue')}</td>` +
+            `<td>${escHtml(f.description ?? f.claim ?? '')}</td>` +
+            `<td style="opacity:0.8">${escHtml(f.suggestion ?? '')}</td>`;
+          tbody.appendChild(tr);
+        });
+
+        table.appendChild(tbody);
+        section.appendChild(table);
+        root.appendChild(section);
+      });
+
+      if (!anyFindings) {
+        const p = document.createElement('p');
+        p.className = 'empty';
+        p.textContent = 'No findings from completed agents so far.';
+        root.appendChild(p);
+      }
     }
 
     function escHtml(str) {
