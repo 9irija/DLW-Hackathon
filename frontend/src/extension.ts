@@ -1,9 +1,9 @@
 import * as vscode from 'vscode';
-import { AgentStatusPanel } from './panels/AgentStatusPanel';
-import { SetupPanel }       from './panels/SetupPanel';
-import { FindingsPanel }    from './panels/FindingsPanel';
-import * as client          from './utils/backendClient';
-import { clearHighlights }  from './utils/highlighter';
+import { AgentStatusPanel }          from './panels/AgentStatusPanel';
+import { SetupPanel, uploadedDocs }  from './panels/SetupPanel';
+import { FindingsPanel }             from './panels/FindingsPanel';
+import * as client                   from './utils/backendClient';
+import { clearHighlights }           from './utils/highlighter';
 import type { AgentResult, AgentFinding, SessionStatus } from './types/agents';
 
 // ─── Module state ─────────────────────────────────────────────────────────────
@@ -41,22 +41,28 @@ export function activate(context: vscode.ExtensionContext): void {
 
   // ── Wire panel decision callback ─────────────────────────────────────────────
   FindingsPanel.onDecision = _handleFindingsDecision;
+  SetupPanel.onStartSession = () => _startReview(true);
 
   // ── Commands ────────────────────────────────────────────────────────────────
   context.subscriptions.push(
-
-    vscode.commands.registerCommand('runchecks.startReview', () =>
-      _startReview()
-    ),
-
-    vscode.commands.registerCommand('runchecks.openSetup', () =>
-      SetupPanel.show(context.extensionUri)
-    ),
-
+    vscode.commands.registerCommand('runchecks.startReview', () => _startReview(false)),
+    vscode.commands.registerCommand('runchecks.startReviewWithDocs', async () => {
+      if (!uploadedDocs.length) {
+        SetupPanel.show(context.extensionUri);
+        vscode.window.showInformationMessage(
+          'RunChecks: No documents loaded. Use "Setup & Documents" to upload docs, then run "Run RunChecks Review (with Docs)".'
+        );
+        return;
+      }
+      await _startReview(true);
+    }),
+    vscode.commands.registerCommand('runchecks.openSetup', () => {
+      SetupPanel.show(context.extensionUri);
+    }),
     vscode.commands.registerCommand('runchecks.showStatus', () => {
       agentStatusProvider.focus();
       vscode.commands.executeCommand('runchecks.agentStatus.focus');
-    }),
+    })
   );
 
   vscode.window.showInformationMessage(
@@ -89,7 +95,7 @@ function _resetAllAgentStates(): void {
 
 // ─── Review flow ──────────────────────────────────────────────────────────────
 
-async function _startReview(): Promise<void> {
+async function _startReview(useDocs: boolean): Promise<void> {
   const editor = vscode.window.activeTextEditor;
   if (!editor) {
     vscode.window.showWarningMessage('RunChecks: Open a file first.');
@@ -123,7 +129,15 @@ async function _startReview(): Promise<void> {
     let startResult!: client.StartReviewResponse;
     await vscode.window.withProgress(
       { location: vscode.ProgressLocation.Notification, title: 'RunChecks: Parsing & reasoning…', cancellable: false },
-      async () => { startResult = await client.startReview(code, filePath, lineStart, lineEnd); }
+      async () => {
+        startResult = await client.startReview(
+          code,
+          filePath,
+          lineStart,
+          lineEnd,
+          useDocs ? uploadedDocs : undefined
+        );
+      }
     );
 
     currentSessionId = startResult.sessionId;
@@ -161,6 +175,10 @@ async function _runAgent(agent: string): Promise<void> {
   if (!currentSessionId) { return; }
 
   _agentStates[agent] = 'running';
+  // Factchecker runs docreader internally when docs are present; show docreader in pipeline
+  if (agent === 'factchecker') {
+    _agentStates['docreader'] = 'running';
+  }
   _pushStatus(agent, false);
   statusBarItem.text = `$(sync~spin) RunChecks — Running ${agent}…`;
 
@@ -173,6 +191,9 @@ async function _runAgent(agent: string): Promise<void> {
 
     const passed = nextResult.agentResult?.['status'] === 'pass';
     _agentStates[agent] = passed ? 'passed' : 'failed';
+    if (agent === 'factchecker') {
+      _agentStates['docreader'] = passed ? 'passed' : 'failed';
+    }
     _pushStatus(agent, true);
 
     const adapted = _adaptAgentResult(nextResult.agentResult, agent);

@@ -62,14 +62,28 @@ export interface FinalizeResponse {
 
 // ─── API functions ─────────────────────────────────────────────────────────────
 
+/** Strip data URL prefix so backend gets raw base64 (docreader expects that for PDF/docx). */
+function normalizeDocContent(doc: { name: string; content: string }): { name: string; content: string } {
+  const c = doc.content;
+  if (typeof c !== 'string' || !c.startsWith('data:')) return doc;
+  const comma = c.indexOf(',');
+  if (comma === -1) return doc;
+  return { name: doc.name, content: c.slice(comma + 1).trim() };
+}
+
 /** POST /review/start — runs pre-processing pipeline, returns sessionId + checkpoint */
 export function startReview(
   code:      string,
   filePath:  string,
   lineStart: number,
   lineEnd:   number,
+  docs?:     { name: string; content: string }[],
 ): Promise<StartReviewResponse> {
-  return request('POST', '/review/start', { code, filePath, lineStart, lineEnd });
+  const payload: Record<string, unknown> = { code, filePath, lineStart, lineEnd };
+  if (docs && docs.length) {
+    payload.docs = docs.map(normalizeDocContent);
+  }
+  return request('POST', '/review/start', payload);
 }
 
 /** POST /review/next — runs factchecker, attacker, or skeptic for an existing session */

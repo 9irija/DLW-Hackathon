@@ -7,6 +7,9 @@ export let uploadedDocs: { name: string; content: string }[] = [];
 
 export class SetupPanel {
   public  static readonly viewType = 'runchecks.setup';
+  /** Called when user clicks "Start Review Session" — extension should run review with docs. */
+  public static onStartSession: (() => void | Promise<void>) | undefined;
+
   private static _panel?: SetupPanel;
 
   private readonly _panel_: vscode.WebviewPanel;
@@ -52,9 +55,14 @@ export class SetupPanel {
       vscode.window.showInformationMessage(`RunChecks: "${msg.name}" loaded. It will be included in the next review.`);
       this._refreshDocs();
     }
+    if (msg.type === 'deleteDoc') {
+      uploadedDocs = uploadedDocs.filter(d => d.name !== msg.name!);
+      vscode.window.showInformationMessage(`RunChecks: "${msg.name}" removed from this session.`);
+      this._refreshDocs();
+    }
     if (msg.type === 'startSession') {
-      vscode.window.showInformationMessage(
-        'RunChecks: Docs loaded. Select code and right-click → "🔍 Run RunChecks Review" to begin.'
+      void Promise.resolve(SetupPanel.onStartSession?.()).catch(err =>
+        vscode.window.showErrorMessage(`RunChecks: Failed to start review — ${(err as Error).message}`)
       );
     }
   }
@@ -82,6 +90,9 @@ export class SetupPanel {
                border: 1px solid var(--vscode-panel-border); margin-bottom: 4px; }
   .doc-name  { flex: 1; font-size: 0.82rem; }
   .doc-meta  { font-size: 0.72rem; color: var(--vscode-descriptionForeground); }
+  .doc-delete { border: none; background: transparent; color: var(--vscode-descriptionForeground);
+                cursor: pointer; font-size: 0.8rem; padding: 2px 4px; }
+  .doc-delete:hover { color: #f87171; }
   #docs-empty { color: var(--vscode-descriptionForeground); font-size: 0.82rem;
                 padding: 10px 8px; }
 
@@ -116,9 +127,13 @@ export class SetupPanel {
 <div id="status-msg"></div>
 
 <script nonce="${nonce}">
-  const vscode = acquireVsCodeApi();
+  const vscode    = acquireVsCodeApi();
+  const uploadBtn = document.getElementById('upload-btn');
+  const startBtn  = document.getElementById('start-btn');
+  const statusEl  = document.getElementById('status-msg');
+  const actionsEl = document.querySelector('.actions');
 
-  document.getElementById('upload-btn').onclick = () =>
+  uploadBtn.onclick = () =>
     document.getElementById('file-input').click();
 
   document.getElementById('file-input').onchange = e => {
@@ -127,16 +142,19 @@ export class SetupPanel {
     const reader = new FileReader();
     reader.onload = () => {
       vscode.postMessage({ type: 'uploadDoc', name: file.name, content: reader.result });
-      document.getElementById('status-msg').textContent = 'Uploading ' + file.name + '…';
-      document.getElementById('status-msg').className = '';
+      statusEl.textContent = 'Uploading ' + file.name + '…';
+      statusEl.className   = '';
     };
     reader.readAsDataURL(file);
     e.target.value = '';
   };
 
-  document.getElementById('start-btn').onclick = () => {
+  startBtn.onclick = () => {
     vscode.postMessage({ type: 'startSession' });
-    document.getElementById('status-msg').textContent = 'Starting session…';
+    // Lock the setup panel for this session: hide actions and leave only the status message
+    if (actionsEl) actionsEl.style.display = 'none';
+    statusEl.textContent = 'Starting session…';
+    statusEl.className   = '';
   };
 
   window.addEventListener('message', event => {
@@ -146,19 +164,28 @@ export class SetupPanel {
     const list = document.getElementById('docs-list');
     if (!docs.length) {
       list.innerHTML = '<div id="docs-empty">No documents loaded.</div>';
-      document.getElementById('start-btn').disabled = true;
-      document.getElementById('status-msg').textContent = '';
+      startBtn.disabled = true;
+      statusEl.textContent = '';
       return;
     }
     list.innerHTML = docs.map(d =>
       '<div class="doc-item">' +
       '<span class="doc-name">📄 ' + escHtml(d.filename) + '</span>' +
       '<span class="doc-meta">' + new Date(d.uploadedAt).toLocaleTimeString() + ' &nbsp;·&nbsp; ' + d.chunks + ' chunks</span>' +
+      '<button class="doc-delete" data-name="' + escHtml(d.filename) + '" title="Remove document">✖</button>' +
       '</div>'
     ).join('');
-    document.getElementById('start-btn').disabled = false;
-    document.getElementById('status-msg').textContent = '✅ RunChecks is ready to review your code';
-    document.getElementById('status-msg').className = 'status-ready';
+    // Wire delete buttons
+    list.querySelectorAll('.doc-delete').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const name = (btn as HTMLElement).getAttribute('data-name');
+        if (!name) return;
+        vscode.postMessage({ type: 'deleteDoc', name });
+      });
+    });
+    startBtn.disabled = false;
+    statusEl.textContent = '✅ RunChecks is ready to review your code';
+    statusEl.className   = 'status-ready';
   });
 
   function escHtml(s) {

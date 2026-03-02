@@ -112,7 +112,19 @@ export class FindingsPanel {
       : '<div class="all-clear">✅ All Clear — No issues found.</div>';
 
     const summaryHtml = result.summary
-      ? `<div class="summary-box"><span class="label">Agent summary:</span> ${escHtml(result.summary)}</div>`
+      ? `<div class="summary-box">
+           <div class="summary-title">Agent summary</div>
+           <div class="summary-meta">
+             <span>${escHtml(result.agentName)}</span>
+             <span class="dot">•</span>
+             <span>${escHtml(stageLabel)}</span>
+             <span class="dot">•</span>
+             <span>${result.findings.length} finding(s)</span>
+             <span class="dot">•</span>
+             <span>${result.passed ? 'Status: passed (no blockers)' : 'Status: issues found'}</span>
+           </div>
+           <div class="summary-body">${escHtml(result.summary)}</div>
+         </div>`
       : '';
 
     return /* html */`<!DOCTYPE html>
@@ -165,15 +177,63 @@ ${_commonStyles()}
 
   private _getSkepticHtml(raw: Record<string, unknown>): string {
     const nonce   = getNonce();
-    const tests   = raw['tests']   as { passed?: number; failed?: number; total?: number } | undefined;
-    const traffic = raw['traffic'] as { endpoint: string; pass: number; fail: number }[]   | undefined;
-    const latency = raw['latency'] as {
+    const evidence = raw['evidence'] as {
+      failureTimeline?: { passed?: boolean; failed?: boolean }[];
+      endpointHeatmap?: { endpoint: string; passed: number; failed: number }[];
+      latencyDistribution?: { before?: number[]; after?: number[]; unit?: string };
+      userJourneyFailures?: { name: string; failed?: boolean }[];
+    } | undefined;
+
+    const directTests = raw['tests'] as { passed?: number; failed?: number; total?: number } | undefined;
+    const tests = directTests ?? (evidence?.failureTimeline
+      ? {
+          passed: evidence.failureTimeline.filter(p => p.passed).length,
+          failed: evidence.failureTimeline.filter(p => p.failed).length,
+          total:  evidence.failureTimeline.length,
+        }
+      : undefined);
+
+    const directTraffic = raw['traffic'] as { endpoint: string; pass: number; fail: number }[] | undefined;
+    const traffic = directTraffic ?? (evidence?.endpointHeatmap
+      ? evidence.endpointHeatmap.map(e => ({
+          endpoint: String(e.endpoint ?? ''),
+          pass:     Number(e.passed ?? 0),
+          fail:     Number(e.failed ?? 0),
+        }))
+      : undefined);
+
+    const directLatency = raw['latency'] as {
       endpoint: string;
       p50before: number; p50after: number;
       p90before: number; p90after: number;
       p99before: number; p99after: number;
     }[] | undefined;
-    const journeys = raw['journeys'] as { name: string; status: string }[] | undefined;
+
+    const latency = directLatency ?? (evidence?.latencyDistribution
+      ? (() => {
+          const before = evidence.latencyDistribution!.before ?? [];
+          const after  = evidence.latencyDistribution!.after  ?? [];
+          if (!before.length && !after.length) return undefined;
+          const p = (vals: number[], q: number) => _percentile(vals, q);
+          return [{
+            endpoint:  'overall',
+            p50before: before.length ? p(before, 0.5) : 0,
+            p50after:  after.length  ? p(after,  0.5) : 0,
+            p90before: before.length ? p(before, 0.9) : 0,
+            p90after:  after.length  ? p(after,  0.9) : 0,
+            p99before: before.length ? p(before, 0.99) : 0,
+            p99after:  after.length  ? p(after,  0.99) : 0,
+          }];
+        })()
+      : undefined);
+
+    const directJourneys = raw['journeys'] as { name: string; status: string }[] | undefined;
+    const journeys = directJourneys ?? (evidence?.userJourneyFailures
+      ? evidence.userJourneyFailures.map(j => ({
+          name:   String(j.name ?? 'Unknown journey'),
+          status: 'broken',
+        }))
+      : undefined);
 
     const testHtml = tests
       ? `<div class="counter-grid">
@@ -349,21 +409,55 @@ ${_commonStyles()}
       if (sev in sevCount) { sevCount[sev]++; }
     }
 
-    const findingRows = findings.length
-      ? findings.map(f => {
-          const sev   = String(f['severity'] ?? 'low').toLowerCase();
-          const desc  = String(f['description'] ?? f['claim'] ?? '');
-          const sugg  = String(f['suggestion']  ?? '');
-          const agent = String(f['agent']       ?? f['agentName'] ?? '');
-          return `<div class="finding-card">
+    const groupedHtml = findings.length
+      ? (() => {
+          const byAgent = new Map<string, Record<string, unknown>[]>();
+          for (const f of findings) {
+            const agentKey = String(
+              f['agent'] ??
+              f['agentName'] ??
+              f['source'] ??
+              'other'
+            ).toLowerCase();
+            if (!byAgent.has(agentKey)) byAgent.set(agentKey, []);
+            byAgent.get(agentKey)!.push(f);
+          }
+
+          const order = ['factchecker', 'attacker', 'skeptic'];
+          const labels: Record<string, string> = {
+            factchecker: 'Fact Checker',
+            attacker:    'Attacker',
+            skeptic:     'Skeptic',
+          };
+
+          const orderedKeys = [
+            ...order.filter(k => byAgent.has(k)),
+            ...Array.from(byAgent.keys()).filter(k => !order.includes(k)),
+          ];
+
+          return orderedKeys.map(agentKey => {
+            const agentFindings = byAgent.get(agentKey)!;
+            const title = labels[agentKey] ?? (agentKey ? agentKey : 'Other');
+            const cards = agentFindings.map(f => {
+              const sev  = String(f['severity'] ?? 'low').toLowerCase();
+              const desc = String(f['description'] ?? f['claim'] ?? '');
+              const sugg = String(f['suggestion']  ?? '');
+              return `<div class="finding-card">
   <div class="finding-header">
     <span class="sev sev-${escHtml(sev)}">${escHtml(sev)}</span>
-    ${agent ? `<span class="agent-chip">${escHtml(agent)}</span>` : ''}
+    <span class="agent-chip">${escHtml(title)}</span>
   </div>
   <div class="finding-desc"><span class="label">Finding:</span> ${escHtml(desc)}</div>
   ${sugg ? `<div class="finding-suggestion"><span class="label">💡 Suggestion:</span> ${escHtml(sugg)}</div>` : ''}
 </div>`;
-        }).join('')
+            }).join('');
+
+            return `<section class="agent-section">
+  <h3 class="agent-section-title">${escHtml(title)} findings</h3>
+  ${cards}
+</section>`;
+          }).join('');
+        })()
       : '<div class="all-clear">✅ No findings — code is clean.</div>';
 
     return /* html */`<!DOCTYPE html>
@@ -405,7 +499,7 @@ ${_commonStyles()}
 
 <main>
   <div class="findings-hdr">${findings.length} finding(s) across all review stages</div>
-  ${findingRows}
+  ${groupedHtml}
 </main>
 
 <footer>
@@ -466,6 +560,13 @@ function _commonStyles(): string {
   .summary-box { background: var(--vscode-editor-inactiveSelectionBackground);
                  padding: 8px 12px; margin-bottom: 12px; font-size: 0.8rem;
                  border-left: 2px solid var(--vscode-focusBorder); }
+  .summary-title { font-size: 0.72rem; text-transform: uppercase;
+                  letter-spacing: 0.06em; color: var(--vscode-descriptionForeground);
+                  margin-bottom: 2px; font-weight: 700; }
+  .summary-meta  { font-size: 0.7rem; color: var(--vscode-descriptionForeground);
+                  margin-bottom: 4px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+  .summary-meta .dot { opacity: 0.6; }
+  .summary-body { font-size: 0.8rem; }
 
   .all-clear { background: rgba(34,197,94,0.1); border: 1px solid #22c55e;
                color: #4ade80; padding: 20px; text-align: center;
@@ -488,6 +589,11 @@ function _commonStyles(): string {
 
   .changes-msg { font-size: 0.82rem; color: var(--vscode-descriptionForeground);
                  padding: 6px 0; font-style: italic; }
+
+  .agent-section      { margin-bottom: 18px; }
+  .agent-section-title{ font-size: 0.8rem; font-weight: 600;
+                        margin: 0 0 6px; color: var(--vscode-descriptionForeground);
+                        text-transform: uppercase; letter-spacing: 0.06em; }
 </style>`;
 }
 
@@ -505,4 +611,15 @@ function _findingCardHtml(f: AgentFinding): string {
     ? `<div class="finding-suggestion"><span class="label">💡 Suggestion:</span> ${escHtml(f.suggestion)}</div>`
     : ''}
 </div>`;
+}
+
+function _percentile(values: number[], p: number): number {
+  if (!values.length) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  const idx = (sorted.length - 1) * p;
+  const lower = Math.floor(idx);
+  const upper = Math.ceil(idx);
+  if (lower === upper) return sorted[lower];
+  const weight = idx - lower;
+  return sorted[lower] + (sorted[upper] - sorted[lower]) * weight;
 }

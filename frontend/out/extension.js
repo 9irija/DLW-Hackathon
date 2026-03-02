@@ -73,8 +73,18 @@ function activate(context) {
     context.subscriptions.push(vscode.window.registerWebviewViewProvider(AgentStatusPanel_1.AgentStatusPanel.viewType, agentStatusProvider));
     // ── Wire panel decision callback ─────────────────────────────────────────────
     FindingsPanel_1.FindingsPanel.onDecision = _handleFindingsDecision;
+    SetupPanel_1.SetupPanel.onStartSession = () => _startReview(true);
     // ── Commands ────────────────────────────────────────────────────────────────
-    context.subscriptions.push(vscode.commands.registerCommand('runchecks.startReview', () => _startReview()), vscode.commands.registerCommand('runchecks.openSetup', () => SetupPanel_1.SetupPanel.show(context.extensionUri)), vscode.commands.registerCommand('runchecks.showStatus', () => {
+    context.subscriptions.push(vscode.commands.registerCommand('runchecks.startReview', () => _startReview(false)), vscode.commands.registerCommand('runchecks.startReviewWithDocs', async () => {
+        if (!SetupPanel_1.uploadedDocs.length) {
+            SetupPanel_1.SetupPanel.show(context.extensionUri);
+            vscode.window.showInformationMessage('RunChecks: No documents loaded. Use "Setup & Documents" to upload docs, then run "Run RunChecks Review (with Docs)".');
+            return;
+        }
+        await _startReview(true);
+    }), vscode.commands.registerCommand('runchecks.openSetup', () => {
+        SetupPanel_1.SetupPanel.show(context.extensionUri);
+    }), vscode.commands.registerCommand('runchecks.showStatus', () => {
         agentStatusProvider.focus();
         vscode.commands.executeCommand('runchecks.agentStatus.focus');
     }));
@@ -101,7 +111,7 @@ function _resetAllAgentStates() {
     _pushStatus('', false);
 }
 // ─── Review flow ──────────────────────────────────────────────────────────────
-async function _startReview() {
+async function _startReview(useDocs) {
     const editor = vscode.window.activeTextEditor;
     if (!editor) {
         vscode.window.showWarningMessage('RunChecks: Open a file first.');
@@ -127,7 +137,9 @@ async function _startReview() {
     statusBarItem.show();
     try {
         let startResult;
-        await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: 'RunChecks: Parsing & reasoning…', cancellable: false }, async () => { startResult = await client.startReview(code, filePath, lineStart, lineEnd); });
+        await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: 'RunChecks: Parsing & reasoning…', cancellable: false }, async () => {
+            startResult = await client.startReview(code, filePath, lineStart, lineEnd, useDocs ? SetupPanel_1.uploadedDocs : undefined);
+        });
         currentSessionId = startResult.sessionId;
         _agentStates['parser'] = 'passed';
         _agentStates['reasoner'] = 'passed';
@@ -154,6 +166,10 @@ async function _runAgent(agent) {
         return;
     }
     _agentStates[agent] = 'running';
+    // Factchecker runs docreader internally when docs are present; show docreader in pipeline
+    if (agent === 'factchecker') {
+        _agentStates['docreader'] = 'running';
+    }
     _pushStatus(agent, false);
     statusBarItem.text = `$(sync~spin) RunChecks — Running ${agent}…`;
     try {
@@ -161,6 +177,9 @@ async function _runAgent(agent) {
         await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: `RunChecks: Running ${agent}…`, cancellable: false }, async () => { nextResult = await client.runNextAgent(currentSessionId, agent); });
         const passed = nextResult.agentResult?.['status'] === 'pass';
         _agentStates[agent] = passed ? 'passed' : 'failed';
+        if (agent === 'factchecker') {
+            _agentStates['docreader'] = passed ? 'passed' : 'failed';
+        }
         _pushStatus(agent, true);
         const adapted = _adaptAgentResult(nextResult.agentResult, agent);
         FindingsPanel_1.FindingsPanel.show(_context.extensionUri, adapted);
@@ -553,8 +572,13 @@ class SetupPanel {
             vscode.window.showInformationMessage(`RunChecks: "${msg.name}" loaded. It will be included in the next review.`);
             this._refreshDocs();
         }
+        if (msg.type === 'deleteDoc') {
+            exports.uploadedDocs = exports.uploadedDocs.filter(d => d.name !== msg.name);
+            vscode.window.showInformationMessage(`RunChecks: "${msg.name}" removed from this session.`);
+            this._refreshDocs();
+        }
         if (msg.type === 'startSession') {
-            vscode.window.showInformationMessage('RunChecks: Docs loaded. Select code and right-click → "🔍 Run RunChecks Review" to begin.');
+            void Promise.resolve(SetupPanel.onStartSession?.()).catch(err => vscode.window.showErrorMessage(`RunChecks: Failed to start review — ${err.message}`));
         }
     }
     _getHtml() {
@@ -580,6 +604,9 @@ class SetupPanel {
                border: 1px solid var(--vscode-panel-border); margin-bottom: 4px; }
   .doc-name  { flex: 1; font-size: 0.82rem; }
   .doc-meta  { font-size: 0.72rem; color: var(--vscode-descriptionForeground); }
+  .doc-delete { border: none; background: transparent; color: var(--vscode-descriptionForeground);
+                cursor: pointer; font-size: 0.8rem; padding: 2px 4px; }
+  .doc-delete:hover { color: #f87171; }
   #docs-empty { color: var(--vscode-descriptionForeground); font-size: 0.82rem;
                 padding: 10px 8px; }
 
@@ -614,9 +641,13 @@ class SetupPanel {
 <div id="status-msg"></div>
 
 <script nonce="${nonce}">
-  const vscode = acquireVsCodeApi();
+  const vscode    = acquireVsCodeApi();
+  const uploadBtn = document.getElementById('upload-btn');
+  const startBtn  = document.getElementById('start-btn');
+  const statusEl  = document.getElementById('status-msg');
+  const actionsEl = document.querySelector('.actions');
 
-  document.getElementById('upload-btn').onclick = () =>
+  uploadBtn.onclick = () =>
     document.getElementById('file-input').click();
 
   document.getElementById('file-input').onchange = e => {
@@ -625,16 +656,19 @@ class SetupPanel {
     const reader = new FileReader();
     reader.onload = () => {
       vscode.postMessage({ type: 'uploadDoc', name: file.name, content: reader.result });
-      document.getElementById('status-msg').textContent = 'Uploading ' + file.name + '…';
-      document.getElementById('status-msg').className = '';
+      statusEl.textContent = 'Uploading ' + file.name + '…';
+      statusEl.className   = '';
     };
     reader.readAsDataURL(file);
     e.target.value = '';
   };
 
-  document.getElementById('start-btn').onclick = () => {
+  startBtn.onclick = () => {
     vscode.postMessage({ type: 'startSession' });
-    document.getElementById('status-msg').textContent = 'Starting session…';
+    // Lock the setup panel for this session: hide actions and leave only the status message
+    if (actionsEl) actionsEl.style.display = 'none';
+    statusEl.textContent = 'Starting session…';
+    statusEl.className   = '';
   };
 
   window.addEventListener('message', event => {
@@ -644,19 +678,28 @@ class SetupPanel {
     const list = document.getElementById('docs-list');
     if (!docs.length) {
       list.innerHTML = '<div id="docs-empty">No documents loaded.</div>';
-      document.getElementById('start-btn').disabled = true;
-      document.getElementById('status-msg').textContent = '';
+      startBtn.disabled = true;
+      statusEl.textContent = '';
       return;
     }
     list.innerHTML = docs.map(d =>
       '<div class="doc-item">' +
       '<span class="doc-name">📄 ' + escHtml(d.filename) + '</span>' +
       '<span class="doc-meta">' + new Date(d.uploadedAt).toLocaleTimeString() + ' &nbsp;·&nbsp; ' + d.chunks + ' chunks</span>' +
+      '<button class="doc-delete" data-name="' + escHtml(d.filename) + '" title="Remove document">✖</button>' +
       '</div>'
     ).join('');
-    document.getElementById('start-btn').disabled = false;
-    document.getElementById('status-msg').textContent = '✅ RunChecks is ready to review your code';
-    document.getElementById('status-msg').className = 'status-ready';
+    // Wire delete buttons
+    list.querySelectorAll('.doc-delete').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const name = (btn as HTMLElement).getAttribute('data-name');
+        if (!name) return;
+        vscode.postMessage({ type: 'deleteDoc', name });
+      });
+    });
+    startBtn.disabled = false;
+    statusEl.textContent = '✅ RunChecks is ready to review your code';
+    statusEl.className   = 'status-ready';
   });
 
   function escHtml(s) {
@@ -798,7 +841,19 @@ class FindingsPanel {
             ? result.findings.map(f => _findingCardHtml(f)).join('')
             : '<div class="all-clear">✅ All Clear — No issues found.</div>';
         const summaryHtml = result.summary
-            ? `<div class="summary-box"><span class="label">Agent summary:</span> ${escHtml(result.summary)}</div>`
+            ? `<div class="summary-box">
+           <div class="summary-title">Agent summary</div>
+           <div class="summary-meta">
+             <span>${escHtml(result.agentName)}</span>
+             <span class="dot">•</span>
+             <span>${escHtml(stageLabel)}</span>
+             <span class="dot">•</span>
+             <span>${result.findings.length} finding(s)</span>
+             <span class="dot">•</span>
+             <span>${result.passed ? 'Status: passed (no blockers)' : 'Status: issues found'}</span>
+           </div>
+           <div class="summary-body">${escHtml(result.summary)}</div>
+         </div>`
             : '';
         return /* html */ `<!DOCTYPE html>
 <html lang="en">
@@ -848,10 +903,49 @@ ${_commonStyles()}
     // ─── HTML: Skeptic ─────────────────────────────────────────────────────────
     _getSkepticHtml(raw) {
         const nonce = (0, messageHandler_1.getNonce)();
-        const tests = raw['tests'];
-        const traffic = raw['traffic'];
-        const latency = raw['latency'];
-        const journeys = raw['journeys'];
+        const evidence = raw['evidence'];
+        const directTests = raw['tests'];
+        const tests = directTests ?? (evidence?.failureTimeline
+            ? {
+                passed: evidence.failureTimeline.filter(p => p.passed).length,
+                failed: evidence.failureTimeline.filter(p => p.failed).length,
+                total: evidence.failureTimeline.length,
+            }
+            : undefined);
+        const directTraffic = raw['traffic'];
+        const traffic = directTraffic ?? (evidence?.endpointHeatmap
+            ? evidence.endpointHeatmap.map(e => ({
+                endpoint: String(e.endpoint ?? ''),
+                pass: Number(e.passed ?? 0),
+                fail: Number(e.failed ?? 0),
+            }))
+            : undefined);
+        const directLatency = raw['latency'];
+        const latency = directLatency ?? (evidence?.latencyDistribution
+            ? (() => {
+                const before = evidence.latencyDistribution.before ?? [];
+                const after = evidence.latencyDistribution.after ?? [];
+                if (!before.length && !after.length)
+                    return undefined;
+                const p = (vals, q) => _percentile(vals, q);
+                return [{
+                        endpoint: 'overall',
+                        p50before: before.length ? p(before, 0.5) : 0,
+                        p50after: after.length ? p(after, 0.5) : 0,
+                        p90before: before.length ? p(before, 0.9) : 0,
+                        p90after: after.length ? p(after, 0.9) : 0,
+                        p99before: before.length ? p(before, 0.99) : 0,
+                        p99after: after.length ? p(after, 0.99) : 0,
+                    }];
+            })()
+            : undefined);
+        const directJourneys = raw['journeys'];
+        const journeys = directJourneys ?? (evidence?.userJourneyFailures
+            ? evidence.userJourneyFailures.map(j => ({
+                name: String(j.name ?? 'Unknown journey'),
+                status: 'broken',
+            }))
+            : undefined);
         const testHtml = tests
             ? `<div class="counter-grid">
            <div class="counter passed"><span>${tests.passed ?? '—'}</span><label>Passed</label></div>
@@ -1016,21 +1110,50 @@ ${_commonStyles()}
                 sevCount[sev]++;
             }
         }
-        const findingRows = findings.length
-            ? findings.map(f => {
-                const sev = String(f['severity'] ?? 'low').toLowerCase();
-                const desc = String(f['description'] ?? f['claim'] ?? '');
-                const sugg = String(f['suggestion'] ?? '');
-                const agent = String(f['agent'] ?? f['agentName'] ?? '');
-                return `<div class="finding-card">
+        const groupedHtml = findings.length
+            ? (() => {
+                const byAgent = new Map();
+                for (const f of findings) {
+                    const agentKey = String(f['agent'] ??
+                        f['agentName'] ??
+                        f['source'] ??
+                        'other').toLowerCase();
+                    if (!byAgent.has(agentKey))
+                        byAgent.set(agentKey, []);
+                    byAgent.get(agentKey).push(f);
+                }
+                const order = ['factchecker', 'attacker', 'skeptic'];
+                const labels = {
+                    factchecker: 'Fact Checker',
+                    attacker: 'Attacker',
+                    skeptic: 'Skeptic',
+                };
+                const orderedKeys = [
+                    ...order.filter(k => byAgent.has(k)),
+                    ...Array.from(byAgent.keys()).filter(k => !order.includes(k)),
+                ];
+                return orderedKeys.map(agentKey => {
+                    const agentFindings = byAgent.get(agentKey);
+                    const title = labels[agentKey] ?? (agentKey ? agentKey : 'Other');
+                    const cards = agentFindings.map(f => {
+                        const sev = String(f['severity'] ?? 'low').toLowerCase();
+                        const desc = String(f['description'] ?? f['claim'] ?? '');
+                        const sugg = String(f['suggestion'] ?? '');
+                        return `<div class="finding-card">
   <div class="finding-header">
     <span class="sev sev-${escHtml(sev)}">${escHtml(sev)}</span>
-    ${agent ? `<span class="agent-chip">${escHtml(agent)}</span>` : ''}
+    <span class="agent-chip">${escHtml(title)}</span>
   </div>
   <div class="finding-desc"><span class="label">Finding:</span> ${escHtml(desc)}</div>
   ${sugg ? `<div class="finding-suggestion"><span class="label">💡 Suggestion:</span> ${escHtml(sugg)}</div>` : ''}
 </div>`;
-            }).join('')
+                    }).join('');
+                    return `<section class="agent-section">
+  <h3 class="agent-section-title">${escHtml(title)} findings</h3>
+  ${cards}
+</section>`;
+                }).join('');
+            })()
             : '<div class="all-clear">✅ No findings — code is clean.</div>';
         return /* html */ `<!DOCTYPE html>
 <html lang="en">
@@ -1071,7 +1194,7 @@ ${_commonStyles()}
 
 <main>
   <div class="findings-hdr">${findings.length} finding(s) across all review stages</div>
-  ${findingRows}
+  ${groupedHtml}
 </main>
 
 <footer>
@@ -1131,6 +1254,13 @@ function _commonStyles() {
   .summary-box { background: var(--vscode-editor-inactiveSelectionBackground);
                  padding: 8px 12px; margin-bottom: 12px; font-size: 0.8rem;
                  border-left: 2px solid var(--vscode-focusBorder); }
+  .summary-title { font-size: 0.72rem; text-transform: uppercase;
+                  letter-spacing: 0.06em; color: var(--vscode-descriptionForeground);
+                  margin-bottom: 2px; font-weight: 700; }
+  .summary-meta  { font-size: 0.7rem; color: var(--vscode-descriptionForeground);
+                  margin-bottom: 4px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+  .summary-meta .dot { opacity: 0.6; }
+  .summary-body { font-size: 0.8rem; }
 
   .all-clear { background: rgba(34,197,94,0.1); border: 1px solid #22c55e;
                color: #4ade80; padding: 20px; text-align: center;
@@ -1153,6 +1283,11 @@ function _commonStyles() {
 
   .changes-msg { font-size: 0.82rem; color: var(--vscode-descriptionForeground);
                  padding: 6px 0; font-style: italic; }
+
+  .agent-section      { margin-bottom: 18px; }
+  .agent-section-title{ font-size: 0.8rem; font-weight: 600;
+                        margin: 0 0 6px; color: var(--vscode-descriptionForeground);
+                        text-transform: uppercase; letter-spacing: 0.06em; }
 </style>`;
 }
 function _findingCardHtml(f) {
@@ -1169,6 +1304,18 @@ function _findingCardHtml(f) {
         ? `<div class="finding-suggestion"><span class="label">💡 Suggestion:</span> ${escHtml(f.suggestion)}</div>`
         : ''}
 </div>`;
+}
+function _percentile(values, p) {
+    if (!values.length)
+        return 0;
+    const sorted = [...values].sort((a, b) => a - b);
+    const idx = (sorted.length - 1) * p;
+    const lower = Math.floor(idx);
+    const upper = Math.ceil(idx);
+    if (lower === upper)
+        return sorted[lower];
+    const weight = idx - lower;
+    return sorted[lower] + (sorted[upper] - sorted[lower]) * weight;
 }
 
 
@@ -1367,9 +1514,23 @@ function request(method, path, body) {
     });
 }
 // ─── API functions ─────────────────────────────────────────────────────────────
+/** Strip data URL prefix so backend gets raw base64 (docreader expects that for PDF/docx). */
+function normalizeDocContent(doc) {
+    const c = doc.content;
+    if (typeof c !== 'string' || !c.startsWith('data:'))
+        return doc;
+    const comma = c.indexOf(',');
+    if (comma === -1)
+        return doc;
+    return { name: doc.name, content: c.slice(comma + 1).trim() };
+}
 /** POST /review/start — runs pre-processing pipeline, returns sessionId + checkpoint */
-function startReview(code, filePath, lineStart, lineEnd) {
-    return request('POST', '/review/start', { code, filePath, lineStart, lineEnd });
+function startReview(code, filePath, lineStart, lineEnd, docs) {
+    const payload = { code, filePath, lineStart, lineEnd };
+    if (docs && docs.length) {
+        payload.docs = docs.map(normalizeDocContent);
+    }
+    return request('POST', '/review/start', payload);
 }
 /** POST /review/next — runs factchecker, attacker, or skeptic for an existing session */
 function runNextAgent(sessionId, agent) {
