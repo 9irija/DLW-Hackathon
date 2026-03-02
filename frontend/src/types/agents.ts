@@ -5,6 +5,13 @@ export interface AgentFinding {
   line:        number;
   description: string;
   suggestion:  string;
+  // Factchecker-specific extras (optional)
+  codeSnippet?: string;   // lines of code around the issue
+  claim?:       string;   // what the comment/doc says
+  reality?:     string;   // what the code actually does
+  docSource?:   string;   // source document name
+  docSection?:  string;   // section heading in the document
+  docPage?:     number | null; // page number if determinable
 }
 
 export interface AgentResult {

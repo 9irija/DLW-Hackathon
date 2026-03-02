@@ -322,8 +322,16 @@ function _adaptAgentResult(raw: Record<string, unknown>, agent: string): AgentRe
                     ? f['severity'] : 'low') as AgentFinding['severity'],
     file:        String(f['filePath'] ?? f['file']      ?? currentFilePath ?? ''),
     line:        Number(f['line']     ?? 0),
-    description: String(f['description'] ?? f['claim'] ?? ''),
+    // For factchecker: prefer reality (mismatch description) over claim for the main text
+    description: String(f['description'] ?? f['reality'] ?? f['claim'] ?? ''),
     suggestion:  String(f['suggestion']  ?? ''),
+    // Factchecker-specific extras — passed through so FindingsPanel renders them richly
+    codeSnippet: f['codeSnippet'] ? String(f['codeSnippet']) : undefined,
+    claim:       f['claim']       ? String(f['claim'])       : undefined,
+    reality:     f['reality']     ? String(f['reality'])     : undefined,
+    docSource:   f['docSource']   ? String(f['docSource'])   : undefined,
+    docSection:  f['docSection']  ? String(f['docSection'])  : undefined,
+    docPage:     f['docPage'] != null ? Number(f['docPage']) : undefined,
   }));
 
   return {

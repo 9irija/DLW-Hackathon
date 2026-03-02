@@ -27,14 +27,16 @@ export class FindingsPanel {
 
   private static _getOrCreate(extensionUri: vscode.Uri): FindingsPanel {
     if (FindingsPanel._panel) {
-      // Reveal with focus so the tab comes to the front
-      FindingsPanel._panel._panel_.reveal(vscode.ViewColumn.Active, false);
+      // Reveal in its own column (not "Active") so it doesn't replace the source editor
+      const col = FindingsPanel._panel._panel_.viewColumn ?? vscode.ViewColumn.Beside;
+      FindingsPanel._panel._panel_.reveal(col, false);
       return FindingsPanel._panel;
     }
+    // Open beside the currently active source editor so both are visible side-by-side
     const panel = vscode.window.createWebviewPanel(
       FindingsPanel.viewType,
       'RunChecks — Findings',
-      { viewColumn: vscode.ViewColumn.Active, preserveFocus: false },
+      { viewColumn: vscode.ViewColumn.Beside, preserveFocus: false },
       { enableScripts: true, retainContextWhenHidden: true }
     );
     FindingsPanel._panel = new FindingsPanel(panel, extensionUri);
@@ -69,16 +71,20 @@ export class FindingsPanel {
     this._panel_.title        = `RunChecks — ${result.agentName} Findings`;
     this._panel_.webview.html = this._getFindingsHtml(result);
 
-    // Highlight finding lines in the editor
+    // Highlight finding lines in the editor (only valid 1-based line numbers)
     const bySeverity = new Map<string, number[]>();
     for (const f of result.findings) {
+      if (!f.line || f.line < 1) { continue; }  // skip doc findings with no line
       if (!bySeverity.has(f.severity)) { bySeverity.set(f.severity, []); }
       bySeverity.get(f.severity)!.push(f.line);
     }
-    bySeverity.forEach((lines, sev) => {
-      highlightLines(result.findings[0]?.file ?? '', lines, sev as 'critical'|'high'|'medium'|'low')
-        .catch(() => {/* ignore */});
-    });
+    const fileForHighlight = result.findings.find(f => f.file)?.file ?? '';
+    if (fileForHighlight) {
+      bySeverity.forEach((lines, sev) => {
+        highlightLines(fileForHighlight, lines, sev as 'critical'|'high'|'medium'|'low')
+          .catch(() => {/* ignore */});
+      });
+    }
   }
 
   private async _handleMessage(msg: {
@@ -113,7 +119,7 @@ export class FindingsPanel {
 
     const summaryHtml = result.summary
       ? `<div class="summary-box">
-           <div class="summary-title">Agent summary</div>
+           <div class="summary-title">Agent Summary</div>
            <div class="summary-meta">
              <span>${escHtml(result.agentName)}</span>
              <span class="dot">•</span>
@@ -121,9 +127,9 @@ export class FindingsPanel {
              <span class="dot">•</span>
              <span>${result.findings.length} finding(s)</span>
              <span class="dot">•</span>
-             <span>${result.passed ? 'Status: passed (no blockers)' : 'Status: issues found'}</span>
+             <span class="${result.passed ? 'status-pass' : 'status-fail'}">${result.passed ? '✅ No blockers' : '⚠️ Issues found'}</span>
            </div>
-           <div class="summary-body">${escHtml(result.summary)}</div>
+           ${_formatSummaryHtml(result.summary)}
          </div>`
       : '';
 
@@ -146,7 +152,7 @@ ${_commonStyles()}
 </main>
 <footer id="footer">
   <button class="btn btn-primary"   id="approve-btn">✅ Approve &amp; Continue</button>
-  <button class="btn btn-secondary" id="changes-btn">✏️ Request Changes</button>
+  <button class="btn btn-secondary" id="changes-btn">✏️ Make Changes</button>
 </footer>
 
 <script nonce="${nonce}">
@@ -159,7 +165,7 @@ ${_commonStyles()}
   document.getElementById('changes-btn').onclick = () => {
     // Replace footer with a message so buttons can't be pressed again
     document.getElementById('footer').innerHTML =
-      '<div class="changes-msg">✏️ Changes requested — make your fixes then run RunChecks again.</div>';
+      '<div class="changes-msg">✏️ Make your changes, then run RunChecks again.</div>';
     vscode.postMessage({ type: 'decision', stage, decision: 'change' });
   };
 
@@ -292,9 +298,12 @@ ${_commonStyles()}
   .counter.total  span { color: var(--vscode-foreground); }
   table    { border-collapse: collapse; width: 100%; font-size: 0.82rem; }
   th, td   { border: 1px solid var(--vscode-panel-border); padding: 5px 10px; text-align: left; }
-  th       { color: var(--vscode-descriptionForeground); font-weight: 600;
+  th       { color: var(--vscode-foreground); font-weight: 600;
              background: var(--vscode-editor-inactiveSelectionBackground); }
+  td       { color: var(--vscode-foreground); }
   .lat-up  { color: #f87171; font-weight: 600; }
+  .sec-explain { font-size: 0.72rem; color: var(--vscode-descriptionForeground);
+                 margin: -6px 0 8px; font-style: italic; }
   #journeys-list { list-style: none; margin: 0; padding: 0; }
   #journeys-list li { padding: 6px 0; font-size: 0.82rem;
                       border-bottom: 1px solid var(--vscode-panel-border); display: flex; gap: 6px; align-items: center; }
@@ -323,13 +332,14 @@ ${_commonStyles()}
   </section>
 
   <section>
-    <p class="sec-hdr">Latency Impact
-      <span style="font-size:0.65rem;font-weight:400;text-transform:none;letter-spacing:0">
-        (p50 / p90 / p99 — before → after, 🔴 = &gt;50% regression)
-      </span>
+    <p class="sec-hdr">Latency Impact</p>
+    <p class="sec-explain">
+      Measures how long the code takes to run. <strong>p50</strong> = median (half of runs are faster),
+      <strong>p90</strong> = slowest 10%, <strong>p99</strong> = slowest 1% (worst-case).
+      Values show: <em>before this change → after this change</em>. 🔴 means &gt;50% slower (regression).
     </p>
     <table>
-      <thead><tr><th>Endpoint</th><th>p50</th><th>p90</th><th>p99</th></tr></thead>
+      <thead><tr><th>Endpoint / File</th><th>p50 (median)</th><th>p90 (slow)</th><th>p99 (worst)</th></tr></thead>
       <tbody>${latencyRows}</tbody>
     </table>
   </section>
@@ -342,7 +352,7 @@ ${_commonStyles()}
 </main>
 <footer id="footer">
   <button class="btn btn-primary"   id="approve-btn">✅ Approve &amp; Continue</button>
-  <button class="btn btn-secondary" id="changes-btn">✏️ Request Changes</button>
+  <button class="btn btn-secondary" id="changes-btn">✏️ Make Changes</button>
 </footer>
 
 <script nonce="${nonce}" src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
@@ -389,7 +399,8 @@ ${_commonStyles()}
 
   private _getVerdictHtml(data: FinalizeResponse): string {
     const nonce    = getNonce();
-    const verdict  = String(data.verdict ?? 'UNKNOWN');
+    // Normalize: backend returns lowercase/hyphenated ('approve', 'request-changes')
+    const verdict  = _normalizeVerdict(String(data.verdict ?? 'UNKNOWN'));
     const score    = Number(data.score   ?? 0);
     const findings = (data.prioritizedFindings ?? []) as Record<string, unknown>[];
 
@@ -440,7 +451,8 @@ ${_commonStyles()}
             const title = labels[agentKey] ?? (agentKey ? agentKey : 'Other');
             const cards = agentFindings.map(f => {
               const sev  = String(f['severity'] ?? 'low').toLowerCase();
-              const desc = String(f['description'] ?? f['claim'] ?? '');
+              // Prefer reality (factchecker mismatch text), then generic description, then claim
+              const desc = String(f['description'] ?? f['reality'] ?? f['claim'] ?? '');
               const sugg = String(f['suggestion']  ?? '');
               return `<div class="finding-card">
   <div class="finding-header">
@@ -564,9 +576,30 @@ function _commonStyles(): string {
                   letter-spacing: 0.06em; color: var(--vscode-descriptionForeground);
                   margin-bottom: 2px; font-weight: 700; }
   .summary-meta  { font-size: 0.7rem; color: var(--vscode-descriptionForeground);
-                  margin-bottom: 4px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+                  margin-bottom: 6px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
   .summary-meta .dot { opacity: 0.6; }
-  .summary-body { font-size: 0.8rem; }
+  .summary-body { font-size: 0.8rem; color: var(--vscode-foreground); }
+  .summary-lines { list-style: none; margin: 4px 0 0; padding: 0; }
+  .summary-lines li { padding: 3px 0; font-size: 0.8rem; color: var(--vscode-foreground);
+                      border-bottom: 1px solid var(--vscode-panel-border); }
+  .summary-lines li:last-child { border-bottom: none; }
+  .summary-doc { font-weight: 700; color: var(--vscode-foreground); margin-right: 4px; }
+  .status-pass { color: #4ade80; font-weight: 600; }
+  .status-fail { color: #f97316; font-weight: 600; }
+
+  /* Factchecker rich card */
+  .fc-card .code-snippet { font-family: var(--vscode-editor-font-family, monospace);
+    font-size: 0.78rem; background: var(--vscode-editor-background);
+    color: var(--vscode-editor-foreground, var(--vscode-foreground));
+    border: 1px solid var(--vscode-panel-border); padding: 6px 10px;
+    margin: 4px 0; white-space: pre; overflow-x: auto; display: block; border-radius: 2px; }
+  .finding-section { margin-bottom: 6px; }
+  .finding-claim { font-style: italic; color: var(--vscode-foreground);
+                   display: block; margin: 2px 0 1px; }
+  .doc-ref { display: block; font-size: 0.68rem; color: var(--vscode-descriptionForeground);
+             margin-top: 2px; }
+  .doc-badge { font-size: 0.65rem; background: rgba(59,130,246,0.15); color: #3b82f6;
+               padding: 2px 7px; border-radius: 2px; }
 
   .all-clear { background: rgba(34,197,94,0.1); border: 1px solid #22c55e;
                color: #4ade80; padding: 20px; text-align: center;
@@ -598,6 +631,10 @@ function _commonStyles(): string {
 }
 
 function _findingCardHtml(f: AgentFinding): string {
+  // Factchecker findings carry claim/codeSnippet/reality — render them richly
+  if (f.claim || f.codeSnippet || f.reality) {
+    return _factcheckerCardHtml(f);
+  }
   const fileBase = f.file.split(/[\\/]/).pop() ?? f.file;
   return `<div class="finding-card">
   <div class="finding-header">
@@ -611,6 +648,91 @@ function _findingCardHtml(f: AgentFinding): string {
     ? `<div class="finding-suggestion"><span class="label">💡 Suggestion:</span> ${escHtml(f.suggestion)}</div>`
     : ''}
 </div>`;
+}
+
+/** Rich card for factchecker findings that have claim / codeSnippet / docSource fields. */
+function _factcheckerCardHtml(f: AgentFinding): string {
+  const fileBase = f.file ? (f.file.split(/[\\/]/).pop() ?? f.file) : '';
+
+  // ── Code snippet (inline check has line + codeSnippet) ────────────────────
+  const codeSection = f.codeSnippet
+    ? `<div class="finding-section">
+  <span class="label">Code:</span>
+  <pre class="code-snippet">${escHtml(f.codeSnippet)}</pre>${
+      f.file && f.line
+        ? `\n  <span class="file-link" data-file="${escHtml(f.file)}" data-line="${f.line}">↗ ${escHtml(fileBase)} line ${f.line}</span>`
+        : ''
+  }
+</div>`
+    : (f.file && f.line
+        ? `<div class="finding-section"><span class="file-link" data-file="${escHtml(f.file)}" data-line="${f.line}">↗ From line ${f.line} in ${escHtml(fileBase)}</span></div>`
+        : '');
+
+  // ── Doc reference chip (external doc findings) ────────────────────────────
+  const docParts: string[] = [];
+  if (f.docSource)  docParts.push(escHtml(f.docSource));
+  if (f.docSection && f.docSection !== 'unknown' && f.docSection !== 'requirements') {
+    docParts.push(`§ ${escHtml(f.docSection)}`);
+  }
+  if (f.docPage != null) docParts.push(`page ${f.docPage}`);
+  const docRefHtml = docParts.length
+    ? `<span class="doc-ref">from ${docParts.join(' · ')}</span>`
+    : '';
+
+  // ── Claim (what the comment / document says) ──────────────────────────────
+  const claimSection = f.claim
+    ? `<div class="finding-section">
+  <span class="label">Comment/Doc:</span>
+  <span class="finding-claim">${escHtml(f.claim)}</span>
+  ${docRefHtml}
+</div>`
+    : (docRefHtml ? `<div class="finding-section">${docRefHtml}</div>` : '');
+
+  // ── Finding = reality (what the code actually does) ───────────────────────
+  const findingText  = f.reality || f.description;
+  const findingSection = findingText
+    ? `<div class="finding-desc"><span class="label">Finding:</span> ${escHtml(findingText)}</div>`
+    : '';
+
+  return `<div class="finding-card fc-card">
+  <div class="finding-header">
+    <span class="sev sev-${escHtml(f.severity)}">${escHtml(f.severity)}</span>
+    ${f.docSource ? `<span class="doc-badge">📄 ${escHtml(f.docSource)}</span>` : ''}
+  </div>
+  ${codeSection}
+  ${claimSection}
+  ${findingSection}
+  ${f.suggestion
+    ? `<div class="finding-suggestion"><span class="label">💡 Suggestion:</span> ${escHtml(f.suggestion)}</div>`
+    : ''}
+</div>`;
+}
+
+/** Format a pipe-separated agent summary into a readable list. */
+function _formatSummaryHtml(raw: string): string {
+  if (!raw) return '';
+  const parts = raw.split(' | ').map(p => p.trim()).filter(Boolean);
+  if (parts.length <= 1) {
+    return `<div class="summary-body">${escHtml(raw)}</div>`;
+  }
+  const items = parts.map(p => {
+    // Match [DocName] or [Tag] prefix
+    const m = p.match(/^\[([^\]]+)\]\s*(.*)/s);
+    if (m) {
+      return `<li><span class="summary-doc">[${escHtml(m[1])}]</span> ${escHtml(m[2].trim() || m[1])}</li>`;
+    }
+    return `<li>${escHtml(p)}</li>`;
+  }).join('');
+  return `<ul class="summary-lines">${items}</ul>`;
+}
+
+/** Normalise backend verdict strings (lowercase/hyphenated) to display form. */
+function _normalizeVerdict(raw: string): string {
+  const v = (raw ?? '').toLowerCase();
+  if (v === 'approve')                                return 'APPROVE';
+  if (v === 'block')                                  return 'BLOCK';
+  if (v === 'request-changes' || v.includes('change')) return 'REQUEST CHANGES';
+  return (raw ?? '').toUpperCase();
 }
 
 function _percentile(values: number[], p: number): number {

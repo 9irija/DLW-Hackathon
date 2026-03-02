@@ -450,6 +450,11 @@ Respond with valid JSON only (no markdown, no extra text):
 async function run(payload) {
   const { code, filePath, language, docs = [] } = payload;
 
+  // Declare shared accumulators first so the docreader block can safely push to them
+  let allFindings = [];
+  const summaryParts = [];
+  let inlineError = null;
+
   // preprocess docs to obtain metadata (sections/pages)
   const metaMap = {};
   if (docs.length) {
@@ -459,15 +464,16 @@ async function run(payload) {
       if (dr?.docs) {
         dr.docs.forEach(d => { if (d?.name) metaMap[d.name] = d; });
       }
+      // Surface partial parse failures so the UI can show them in the summary
+      if (dr?.status !== 'pass' && dr?.summary) {
+        summaryParts.push(`[docreader] ${dr.summary}`);
+      }
       console.warn('[factchecker] Docreader done. Starting Pass 1 (inline) then Pass 2 (doc vs code).');
     } catch (err) {
       console.error('[factchecker] docreader error:', err.message);
+      summaryParts.push(`[docreader] Failed to parse document(s): ${err.message}`);
     }
   }
-
-  let allFindings = [];
-  const summaryParts = [];
-  let inlineError = null;
 
   // ── Pass 1: Inline comments ───────────────────────────────────────────────
   console.warn('[factchecker] Pass 1: inline comments vs code...');

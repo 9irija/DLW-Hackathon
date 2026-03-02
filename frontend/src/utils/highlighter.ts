@@ -32,20 +32,33 @@ function getDecorationType(severity: Severity): vscode.TextEditorDecorationType 
 /**
  * Highlight specific line numbers in the given file.
  * Lines are 1-based.
+ * Always opens/reveals the source file in its existing column (or Column.One),
+ * never in the webview column, so the findings panel stays visible.
  */
 export async function highlightLines(
   filePath:    string,
   lineNumbers: number[],
   severity:    Severity
 ): Promise<void> {
-  const uri    = vscode.Uri.file(filePath);
-  const doc    = await vscode.workspace.openTextDocument(uri);
-  const editor = await vscode.window.showTextDocument(doc, { preview: false, preserveFocus: true });
+  if (!filePath) { return; }
+  const uri = vscode.Uri.file(filePath);
+  const doc = await vscode.workspace.openTextDocument(uri);
 
-  const ranges = lineNumbers
-    .filter(n => n >= 1 && n <= doc.lineCount)
-    .map(n => new vscode.Range(n - 1, 0, n - 1, doc.lineAt(n - 1).text.length));
+  // Find the file in an already-visible editor to reuse its column
+  const existing = vscode.window.visibleTextEditors.find(
+    e => e.document.uri.fsPath === uri.fsPath
+  );
 
+  const editor = await vscode.window.showTextDocument(doc, {
+    viewColumn:    existing?.viewColumn ?? vscode.ViewColumn.One,
+    preview:       false,
+    preserveFocus: true,   // keep focus on the findings panel
+  });
+
+  const validLines = lineNumbers.filter(n => n >= 1 && n <= doc.lineCount);
+  const ranges = validLines.map(
+    n => new vscode.Range(n - 1, 0, n - 1, doc.lineAt(n - 1).text.length)
+  );
   editor.setDecorations(getDecorationType(severity), ranges);
 }
 
@@ -58,15 +71,31 @@ export function clearHighlights(): void {
   }
 }
 
-/** Open a file and scroll to the given line (1-based). */
+/**
+ * Open a file and scroll to the given line (1-based).
+ * Reuses the file's existing editor column so the webview panel is not disturbed.
+ * Focuses the editor so the user can see the navigated-to line.
+ */
 export async function jumpToLine(filePath: string, lineNumber: number): Promise<void> {
+  if (!filePath || !lineNumber || lineNumber < 1) { return; }
+
   const uri  = vscode.Uri.file(filePath);
   const doc  = await vscode.workspace.openTextDocument(uri);
-  const line = Math.max(0, lineNumber - 1);
-  const pos  = new vscode.Position(line, 0);
+
+  // Clamp to valid line index (0-based)
+  const lineIdx = Math.min(lineNumber - 1, doc.lineCount - 1);
+  const pos     = new vscode.Position(lineIdx, 0);
+
+  // Reuse the column the file is already in; fall back to Column.One
+  const existing = vscode.window.visibleTextEditors.find(
+    e => e.document.uri.fsPath === uri.fsPath
+  );
+
   await vscode.window.showTextDocument(doc, {
-    selection:    new vscode.Range(pos, pos),
-    preview:      false,
+    viewColumn:    existing?.viewColumn ?? vscode.ViewColumn.One,
+    selection:     new vscode.Range(pos, pos),
+    preview:       false,
+    preserveFocus: false,  // focus the editor so the user sees the line
   });
 }
 
