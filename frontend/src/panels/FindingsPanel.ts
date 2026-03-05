@@ -270,6 +270,29 @@ ${_commonStyles()}
         }).join('')
       : '<li class="placeholder">No journey data available.</li>';
 
+    // ── Recommendation ─────────────────────────────────────────────────────────
+    const rec = raw['recommendation'] as
+      { action: string; label: string; reasons: string[] } | undefined;
+
+    const recActionSafe = rec?.action === 'approve' ? 'approve'
+                        : rec?.action === 'hold'    ? 'hold'
+                        :                             'review';
+
+    const recIcon  = recActionSafe === 'approve' ? '✅'
+                   : recActionSafe === 'hold'    ? '🚫' : '⚠️';
+
+    const recHtml = rec
+      ? `<div class="rec-card rec-${recActionSafe}">
+           <div class="rec-icon">${recIcon}</div>
+           <div class="rec-body">
+             <div class="rec-label">${escHtml(rec.label)}</div>
+             ${rec.reasons.length
+               ? `<ul class="rec-reasons">${rec.reasons.map(r => `<li>${escHtml(r)}</li>`).join('')}</ul>`
+               : ''}
+           </div>
+         </div>`
+      : '';
+
     // Inline traffic data so Chart.js renders immediately without a postMessage race
     const trafficJson = JSON.stringify(traffic ?? []);
     const hasTraffic  = (traffic && traffic.length) ? 'true' : 'false';
@@ -310,6 +333,19 @@ ${_commonStyles()}
   .journey-status { font-size: 0.65rem; text-transform: uppercase; font-weight: 600;
                     color: var(--vscode-descriptionForeground); margin-left: auto; }
   #chart-wrap { position: relative; height: 220px; }
+  /* Recommendation banner */
+  .rec-card    { display: flex; align-items: flex-start; gap: 14px; padding: 14px 16px;
+                 margin-bottom: 20px; border-left: 4px solid; border-radius: 2px; }
+  .rec-approve { border-color: #4ade80; background: rgba(74,222,128,0.08); }
+  .rec-review  { border-color: #f97316; background: rgba(249,115,22,0.08); }
+  .rec-hold    { border-color: #ef4444; background: rgba(239,68,68,0.08); }
+  .rec-icon    { font-size: 1.6rem; line-height: 1; flex-shrink: 0; margin-top: 1px; }
+  .rec-body    { flex: 1; min-width: 0; }
+  .rec-label   { font-size: 0.88rem; font-weight: 700; margin-bottom: 6px;
+                 color: var(--vscode-foreground); }
+  .rec-reasons { margin: 0; padding-left: 16px; }
+  .rec-reasons li { font-size: 0.78rem; color: var(--vscode-foreground);
+                    margin-bottom: 3px; word-break: break-word; }
 </style>
 </head>
 <body>
@@ -318,6 +354,8 @@ ${_commonStyles()}
   <div class="sub">Stage 3 (Optional) — Shadow execution &amp; latency impact</div>
 </header>
 <main>
+
+  ${recHtml}
 
   <section>
     <p class="sec-hdr">Test Results</p>

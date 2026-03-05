@@ -38,9 +38,10 @@ Pre-processing (Parser + Reasoner) is always synchronous and automatic. Every su
 |---|---|---|
 | **Parser** | Splits code into logical segments (functions, classes, blocks) | Structured segments with language + line ranges |
 | **Reasoner** | Enriches segments with doc context → `CodeContext` | Unified analysis payload for downstream agents |
-| **Fact Checker** | Two-pass accuracy check: inline comments vs implementation, external docs vs code | Findings with `claim`, `reality`, `severity`, `suggestion` |
+| **Fact Checker** | Two-pass accuracy check: inline comments vs implementation, external docs vs code. Uses absolute line-numbered prompts and `buildNumberedCode` for correct snippet extraction | Findings with `claim`, `reality`, `codeSnippet`, `severity`, `line`, `suggestion`, `docSource?` |
 | **Attacker** | Adversarial security scan: injection, auth bypass, data exposure, OWASP Top-10 | Findings with CWE ID, PoC evidence, exploit risk |
-| **Skeptic** | Shadow execution, test result diff, traffic replay, latency impact | Pass/fail breakdown, latency tables, user journey status |
+| **Skeptic** | Shadow execution + test suite runner. Synthesises findings and latency data into an actionable `recommendation` (`approve` / `review` / `hold`) with concrete reasons | Pass/fail breakdown, latency distribution, user journey status, `recommendation` |
+| **DocReader** | Ingest PDFs, DOCX, and plain-text docs. Handles native Buffers, JSON-serialised Buffers, data URLs, and bare base64 | `{ docs: [{ name, pageCount, sections }] }` |
 | **Orchestrator** | Collects results, normalises findings, computes score, issues verdict | `verdict`, `score`, `prioritizedFindings`, `agentResults` |
 
 ---
@@ -70,7 +71,9 @@ RunChecks/
 │   │   ├── embeddings.js    ← text-embedding-3-small via OpenAI
 │   │   └── storage.js       ← chunk store + cosine similarity retrieval (top-5)
 │   ├── shadow/
-│   │   └── runner.js        ← child_process snippet executor (JS)
+│   │   ├── runner.js        ← child_process snippet executor (JS)
+│   │   ├── testRunner.js    ← test suite runner (jest/mocha detection)
+│   │   └── flowParser.js    ← import/require graph → nodes + edges
 │   ├── data/audit.db        ← SQLite database (auto-created)
 │   ├── .env.example
 │   └── index.js             ← Express server (port 3001)
@@ -146,13 +149,13 @@ VS Code will:
 
 1. Review starts → backend runs Parser + Reasoner automatically
 2. VS Code notification: **"Pre-processing complete. Run Fact Checker?"** → click to continue
-3. Fact Checker runs → **FindingsPanel** opens with results
+3. Fact Checker runs → **FindingsPanel** opens with results (each finding shows CLAIM / REALITY / CODE snippet / clickable file link)
 4. Click **✅ Approve & Continue** → Attacker runs → FindingsPanel updates
 5. Click **✅ Approve & Continue** → modal asks: **"Run Skeptic"** or **"Finalize Now"**
-6. (Optional) Skeptic runs → **SkepticPanel** opens with test/traffic/latency data
+6. (Optional) Skeptic runs → **SkepticPanel** opens with a colour-coded recommendation banner (`approve` / `review` / `hold`), test results, latency charts, and a system flow diagram
 7. Click **✅ Approve** → final verdict notification (`APPROVE / REQUEST CHANGES / BLOCK` + score)
 
-At any gate, **✏️ Request Changes** stops the pipeline so you can fix issues before re-running.
+At any gate, **✏️ Make Changes** stops the pipeline so you can fix issues before re-running.
 
 ---
 
@@ -205,10 +208,11 @@ PORT=3001
 | Layer | Technology |
 |---|---|
 | Backend | Node.js, Express, CommonJS |
-| LLM | OpenAI Responses API (Codex / gpt-4o) |
+| LLM | OpenAI Responses API (`gpt-4o` / `gpt-4o-mini`) |
 | Embeddings | `text-embedding-3-small` |
 | Vector store | SQLite (cosine similarity, top-5 retrieval) |
+| Doc parsing | `pdf-parse` (PDF), `mammoth` (DOCX) |
 | Audit log | SQLite (`audit_log` table) |
 | Frontend | VS Code Extension API, TypeScript, webpack |
 | UI | VS Code Webview (CSP-safe, nonce-protected) |
-| Charts | Chart.js 4 (CDN, SkepticPanel only) |
+| Charts | Chart.js 4 (CDN, Skeptic panel only — CSS vars resolved via `getComputedStyle`) |

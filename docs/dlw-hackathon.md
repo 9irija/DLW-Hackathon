@@ -73,8 +73,11 @@ A VS Code extension backed by a stateful Express API that runs six AI agents acr
 
 **Stage 1 — Fact Checker:**
 - **Pass 1 (inline):** each parsed segment's comments are compared against its actual implementation via the LLM
-- **Pass 2 (external docs):** `DocReader` extracts text from uploaded PDFs / Markdown, then each doc section is compared against the code
-- Output: `findings[{ claim, reality, severity, line, suggestion, docSource?, docSection? }]`
+- **Pass 2 (external docs):** `DocReader` extracts text from uploaded PDFs / DOCX / Markdown, then each doc section is compared against the code
+- **Pass 3 (explicit rules):** any tagged rules (FR-xxx, AR-xxx, etc.) extracted from docs are verified against the code
+- All three passes use `buildNumberedCode()` — a helper that preserves **absolute** line numbers even when code is truncated, ensuring the LLM always reports the correct file position
+- `extractSnippet(code, line)` pulls ±3 lines around each reported line to populate the `codeSnippet` field shown in the UI
+- Output: `findings[{ claim, reality, codeSnippet, severity, line, suggestion, docSource?, docSection?, docPage? }]`
 
 **Stage 2 — Attacker:**
 - OWASP Top-10 scan across the full `CodeContext`
@@ -83,11 +86,14 @@ A VS Code extension backed by a stateful Express API that runs six AI agents acr
 - Output: `findings[{ cwe, severity, attackVector, impact, exploitProof }]`
 
 **Stage 3 — Skeptic (optional, user-initiated):**
-- Shadow test execution diff (pass/fail counts before vs after change)
-- Traffic replay pass/fail breakdown by endpoint
-- Latency impact table (p50 / p90 / p99 before vs after)
-- User journey health: `unaffected` / `broken` / `degraded`
-- Output: `{ tests, traffic, latency, journeys, flowNodes, flowEdges }`
+- Shadow test execution: runs test suite or code snippet in isolated child process
+- Builds chart-ready evidence: failure timeline, endpoint heatmap, latency distribution (first-half vs second-half proxy baseline), user journey failures
+- `buildRecommendation()` synthesises findings + p99 latency data into a single actionable signal:
+  - `hold` — any high/critical finding (blocks deployment, reasons listed)
+  - `review` — medium findings OR p99 latency regression > 50% vs baseline
+  - `approve` — all clear, safe to proceed
+- Frontend renders a **colour-coded recommendation banner** (green / orange / red) at the top of the Skeptic panel before test results
+- Output: `{ tests, evidence: { failureTimeline, endpointHeatmap, latencyDistribution, userJourneyFailures }, flow, recommendation: { action, label, reasons } }`
 
 ---
 
@@ -133,6 +139,18 @@ Backend agents return `{ agent, status, findings, summary }`. VS Code panels exp
 ### 6. Local doc storage avoids a separate upload API
 
 The Setup panel stores uploaded docs in an in-memory array (`uploadedDocs`) within the extension. Docs are passed in the `/review/start` body, giving the Fact Checker's external pass access to reference material without a dedicated document management API.
+
+### 7. Absolute line numbers survive code truncation (`buildNumberedCode`)
+
+When code exceeds the LLM context budget, naively slicing and re-labelling lines (`1, 2, 3...`) causes the tail of the file to have wrong line numbers. `buildNumberedCode(code, maxChars)` splits the budget evenly between a **head** (from line 1) and a **tail** (from the end), labelling every line with its real file position and inserting an omission marker in between. The LLM always sees correct line numbers, so `extractSnippet` always retrieves the right code.
+
+### 8. Unified buffer detection in DocReader (`toBuffer`)
+
+VS Code's file-picker API, `FileReader`, JSON serialisation, and direct Buffer objects all produce different representations of the same binary content. A single `toBuffer(content)` function handles all four formats — native `Buffer`, JSON-serialised `{type:'Buffer',data:[...]}`, data URLs (`data:<mime>;base64,...`), and bare base64 strings — before passing content to `pdf-parse` or `mammoth`. This eliminated the "document failed to process" errors seen when uploading PDFs via the VS Code extension.
+
+### 9. Skeptic as a decision engine, not just a reporter
+
+The initial Skeptic design simply reported pass/fail counts and latency numbers. We added `buildRecommendation()` so the agent synthesises everything into one of three explicit actions with labelled reasons. Developers no longer have to interpret raw data — they get a clear signal ("Hold — fix test X before deploying") with the evidence attached.
 
 ---
 
@@ -204,11 +222,12 @@ SkepticPanel: Approve  OR  FindingsPanel: Finalize Now
 | Panel | VS Code type | Role |
 |---|---|---|
 | `AgentStatusPanel` | `WebviewViewProvider` (sidebar) | Live pipeline strip with stage labels and agent state badges |
-| `SetupPanel` | `WebviewPanel` (tab) | Doc upload to in-memory store + guidance to start review |
-| `FindingsPanel` | `WebviewPanel` (tab) | Per-agent findings with severity badges, clickable file:line links, decision footer |
-| `SkepticPanel` | `WebviewPanel` (tab) | Test counters, Chart.js bar chart, latency table, journey list, SVG flow diagram |
+| `SetupPanel` | `WebviewPanel` (tab) | Doc upload (PDF / DOCX / Markdown) to in-memory store + guidance to start review |
+| `FindingsPanel` | `WebviewPanel` (tab) | Per-agent findings — CLAIM / REALITY / CODE snippet cards with clickable `file:line` links and severity badges; Approve / Make Changes footer |
+| `SkepticPanel` → `FindingsPanel` | `WebviewPanel` (tab) | Colour-coded recommendation banner (approve / review / hold), test result counters, Chart.js bar charts, latency table, user journey list, SVG flow diagram |
+| Verdict page (inside `FindingsPanel`) | Inline HTML section | Final APPROVE / REQUEST CHANGES / BLOCK verdict with score, prioritised findings in CLAIM/REALITY/CODE format, and clickable file links |
 
-All webviews use CSP-safe nonce injection. Chart.js CDN is allowed **only** in SkepticPanel's `Content-Security-Policy` header.
+All webviews use CSP-safe nonce injection. Chart.js CDN is scoped only to the Skeptic view's `Content-Security-Policy` header. Colors in Chart.js are resolved via `getComputedStyle` rather than CSS variable strings, ensuring correct rendering in all VS Code themes.
 
 ---
 

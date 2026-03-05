@@ -87,25 +87,56 @@ function splitSections(text) {
     .map(({ title, startLine, endLine }) => ({ title, startLine, endLine }));
 }
 
-// Stricter base64 check — requires length and absence of spaces/punctuation
-function isLikelyBase64(str) {
-  return (
-    typeof str === 'string' &&
-    str.length > 200 &&
-    /^[A-Za-z0-9+/]+=*$/.test(str.replace(/\s/g, ''))
-  );
+/**
+ * Convert any content format the frontend may send into a Node Buffer,
+ * or return null when the content is already plain text.
+ *
+ * Supported formats:
+ *   1. Native Buffer                         — already decoded
+ *   2. { type: 'Buffer', data: [...] }       — JSON.stringify(buffer) round-trip
+ *   3. data:<mime>;base64,<encoded>          — FileReader / VS Code file picker output
+ *   4. Bare base64 string (no URL wrapper)   — manual encoding
+ */
+function toBuffer(content) {
+  if (Buffer.isBuffer(content)) return content;
+
+  // JSON-serialised Buffer
+  if (
+    content !== null &&
+    typeof content === 'object' &&
+    content.type === 'Buffer' &&
+    Array.isArray(content.data)
+  ) {
+    return Buffer.from(content.data);
+  }
+
+  if (typeof content !== 'string') return null;
+
+  // Data URL: data:<mime>;base64,<encoded>
+  const dataUrlMatch = content.match(/^data:[^;]+;base64,(.+)$/s);
+  if (dataUrlMatch) {
+    try {
+      return Buffer.from(dataUrlMatch[1].replace(/\s/g, ''), 'base64');
+    } catch {
+      return null;
+    }
+  }
+
+  // Bare base64 — must be long and contain only valid base64 characters
+  if (
+    content.length > 200 &&
+    /^[A-Za-z0-9+/]+=*$/.test(content.replace(/\s/g, ''))
+  ) {
+    try { return Buffer.from(content, 'base64'); } catch { return null; }
+  }
+
+  return null; // plain text — caller handles as string
 }
 
 // ─── Text extraction ──────────────────────────────────────────────────────────
 
 async function extractText(doc) {
-  let buf = null;
-  if (Buffer.isBuffer(doc.content)) {
-    buf = doc.content;
-  } else if (isLikelyBase64(doc.content)) {
-    try { buf = Buffer.from(doc.content, 'base64'); } catch { buf = null; }
-  }
-
+  const buf = toBuffer(doc.content);
   const name = (doc.name || '').toLowerCase();
 
   if (name.endsWith('.pdf') && buf) {

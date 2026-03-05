@@ -87,15 +87,69 @@ async function run(payload) {
         ? 'No test failures; flow graph available for impact analysis.'
         : 'Skeptic: shadow execution completed; no failures detected.';
 
+  const recommendation = buildRecommendation(findings, evidence);
+
   return {
     agent: 'skeptic',
     status,
     confidence,
     findings,
     summary,
+    recommendation,
     evidence: evidence || undefined,
     flow: flow && (flow.nodes.length > 1 || flow.edges.length > 0) ? flow : undefined,
   };
+}
+
+/**
+ * Synthesise an actionable recommendation from findings and execution evidence.
+ *
+ * Returns { action: 'approve'|'review'|'hold', label: string, reasons: string[] }
+ *
+ *   hold    — at least one high/critical finding (test failure, runtime error, timeout).
+ *             Blocks deployment: developer must fix before proceeding.
+ *   review  — medium findings or a measurable latency regression (p99 > 50% increase).
+ *             Caution advised; developer should consciously decide.
+ *   approve — all checks passed; safe to proceed.
+ */
+function buildRecommendation(findings, evidence) {
+  const reasons = [];
+
+  // Blocking: any high or critical finding
+  const blocking = findings.filter((f) => f.severity === 'high' || f.severity === 'critical');
+  if (blocking.length > 0) {
+    blocking.forEach((f) => reasons.push(f.description.slice(0, 140)));
+    return { action: 'hold', label: 'Hold — Fix failures before deploying', reasons };
+  }
+
+  // Latency regression: p99 increased > 50% compared to baseline
+  let hasLatencyRegression = false;
+  const dist = evidence?.latencyDistribution;
+  if (dist && Array.isArray(dist.before) && dist.before.length > 0 &&
+      Array.isArray(dist.after) && dist.after.length > 0) {
+    const pct = (arr, q) => {
+      const s = [...arr].sort((a, b) => a - b);
+      return s[Math.floor((s.length - 1) * q)];
+    };
+    const p99Before = pct(dist.before, 0.99);
+    const p99After  = pct(dist.after,  0.99);
+    if (p99Before > 0 && p99After > p99Before * 1.5) {
+      hasLatencyRegression = true;
+      const pctIncrease = Math.round((p99After / p99Before - 1) * 100);
+      reasons.push(`p99 latency increased ${pctIncrease}% (${p99Before}ms → ${p99After}ms)`);
+    }
+  }
+
+  // Cautionary: medium findings
+  const cautionary = findings.filter((f) => f.severity === 'medium');
+  cautionary.forEach((f) => reasons.push(f.description.slice(0, 140)));
+
+  if (cautionary.length > 0 || hasLatencyRegression) {
+    return { action: 'review', label: 'Review — Proceed with caution', reasons };
+  }
+
+  reasons.push('No test failures, runtime errors, or latency regressions detected.');
+  return { action: 'approve', label: 'Safe to proceed', reasons };
 }
 
 /**
