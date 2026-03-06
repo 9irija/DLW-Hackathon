@@ -480,6 +480,11 @@ ${_commonStyles()}
             attacker:    'Attacker',
             skeptic:     'Skeptic',
           };
+          const subtitles: Record<string, string> = {
+            factchecker: 'Code snippet and document quotation per finding',
+            attacker:    '',
+            skeptic:     '',
+          };
 
           const orderedKeys = [
             ...order.filter(k => byAgent.has(k)),
@@ -489,13 +494,15 @@ ${_commonStyles()}
           return orderedKeys.map(agentKey => {
             const agentFindings = byAgent.get(agentKey)!;
             const title = labels[agentKey] ?? (agentKey ? agentKey : 'Other');
-            // Reuse the same rich card format as the individual findings pages
+            const sub = subtitles[agentKey];
+            // Reuse the same rich card format as the individual findings pages (claim, reality, codeSnippet, docSource)
             const cards = agentFindings
               .map(f => _findingCardHtml(_rawFindingToAgentFinding(f)))
               .join('');
 
             return `<section class="agent-section">
   <h3 class="agent-section-title">${escHtml(title)} findings</h3>
+  ${sub ? `<p class="agent-section-sub">${escHtml(sub)}</p>` : ''}
   ${cards}
 </section>`;
           }).join('');
@@ -663,6 +670,8 @@ function _commonStyles(): string {
   .agent-section-title{ font-size: 0.8rem; font-weight: 600;
                         margin: 0 0 6px; color: var(--vscode-descriptionForeground);
                         text-transform: uppercase; letter-spacing: 0.06em; }
+  .agent-section-sub   { font-size: 0.72rem; color: var(--vscode-descriptionForeground);
+                        margin: -2px 0 8px; }
 </style>`;
 }
 

@@ -188,22 +188,29 @@ const RULE_VERIFY_SYSTEM = `You are a strict requirements verifier. Only report 
  * @throws {Error} if parsing ultimately fails
  */
 function repairTruncatedJson(raw) {
-  // strip markdown fences
+  if (typeof raw !== 'string' || !raw.trim()) throw new Error('Unable to repair JSON');
+
+  // strip markdown fences and leading/trailing noise
   let txt = raw.replace(/^```json?\s*/i, '').replace(/```\s*$/i, '').trim();
+  const first = txt.indexOf('{');
+  if (first > 0) txt = txt.slice(first);
 
   // try straightforward parse
   try { return JSON.parse(txt); } catch (_) {}
 
-  // extract outermost braces
-  const first = txt.indexOf('{');
-  const last  = txt.lastIndexOf('}');
-  if (first !== -1 && last > first) {
-    try { return JSON.parse(txt.slice(first, last + 1)); } catch (_) {}
+  // remove trailing comma before } or ] (common LLM mistake)
+  const noTrailingComma = txt.replace(/,(\s*[}\]])/g, '$1');
+  try { return JSON.parse(noTrailingComma); } catch (_) {}
+
+  const last = txt.lastIndexOf('}');
+  if (last !== -1 && last > first) {
+    try { return JSON.parse(txt.slice(0, last + 1)); } catch (_) {}
+    const slice = txt.slice(0, last + 1).replace(/,(\s*[}\]])/g, '$1');
+    try { return JSON.parse(slice); } catch (_) {}
   }
 
-  // attempt to close open strings and brackets
-  let snippet = first !== -1 ? txt.slice(first) : txt;
-
+  // attempt to close open strings and brackets (brace-only, no in-string handling)
+  let snippet = txt;
   const quoteCount = (snippet.match(/(?<!\\)"/g) || []).length;
   if (quoteCount % 2 !== 0) snippet += '"';
 
@@ -213,8 +220,9 @@ function repairTruncatedJson(raw) {
     else if ((ch === '}' || ch === ']') && stack.length) stack.pop();
   }
   snippet += stack.reverse().join('');
-
+  snippet = snippet.replace(/,(\s*[}\]])/g, '$1');
   try { return JSON.parse(snippet); } catch (_) {}
+
   throw new Error('Unable to repair JSON');
 }
 
@@ -381,13 +389,8 @@ async function checkDocAgainstCode(code, filePath, doc, meta, plainText) {
       max_tokens: 4096,
     })) || '';
 
-    let parsed;
-    try {
-      parsed = repairTruncatedJson(raw);
-    } catch (err) {
-      console.error(`[factchecker] doc parser error (${doc.name} section ${snip.title}): ${err.message}. Raw response:\n${raw}`);
-      return { findings: [], summary: '' };
-    }
+    // Parse LLM JSON; on failure we throw so the run fails and you can fix the model (finetune).
+    const parsed = repairTruncatedJson(raw);
 
     const findings = Array.isArray(parsed.findings)
       ? parsed.findings.map(f => {
@@ -473,13 +476,8 @@ Respond with valid JSON only (no markdown, no extra text):
     max_tokens: 4096,
   })) || '';
 
-  let parsed;
-  try {
-    parsed = repairTruncatedJson(raw);
-  } catch (err) {
-    console.error(`[factchecker] rule verification parse error (${doc.name}):`, err.message);
-    return { findings: [], summary: '' };
-  }
+  // Parse LLM JSON; on failure we throw so the run fails and you can fix the model (finetune).
+  const parsed = repairTruncatedJson(raw);
 
   const findings = (parsed.findings || []).map(f => {
     const codeLineRaw = Number(f.line);
@@ -585,6 +583,7 @@ async function run(payload) {
       }
     } catch (ex) {
       console.error(`[factchecker] rule verification failed (${doc.name}):`, ex.message);
+      throw ex;
     }
 
     // ── Pass 2b: Full document vs code check (per section) ───────────────────
@@ -597,6 +596,7 @@ async function run(payload) {
     } catch (err) {
       console.error(`[factchecker] doc check error (${doc.name}):`, err.message);
       summaryParts.push(`[${doc.name}] document check failed: ${err.message}`);
+      throw err;
     }
   }
 

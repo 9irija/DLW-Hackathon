@@ -58,16 +58,19 @@ function normalise(f, agentName) {
     description: f.description || f.claim || f.type || '',
     severity:    ['critical', 'high', 'medium', 'low'].includes(f.severity) ? f.severity : 'low',
     suggestion:  f.suggestion || '',
+    ...(f.filePath     != null && { filePath:     f.filePath     }),
     ...(f.claim        != null && { claim:        f.claim        }),
     ...(f.reality      != null && { reality:      f.reality      }),
+    ...(f.codeSnippet  != null && { codeSnippet:  f.codeSnippet  }),
+    ...(f.docSource    != null && { docSource:    f.docSource    }),
+    ...(f.docSection   != null && { docSection:   f.docSection   }),
+    ...(f.docPage      != null && { docPage:      f.docPage      }),
     ...(f.cwe          != null && { cwe:          f.cwe          }),
     ...(f.attackVector != null && { attackVector: f.attackVector }),
     ...(f.impact       != null && { impact:       f.impact       }),
     ...(f.confidence   != null && { confidence:   f.confidence   }),
     ...(f.category     != null && { category:     f.category     }),
     ...(f.exploitProof != null && { exploitProof: f.exploitProof }),
-    ...(f.docSource    != null && { docSource:    f.docSource    }),
-    ...(f.docSection   != null && { docSection:   f.docSection   }),
   };
 }
 
