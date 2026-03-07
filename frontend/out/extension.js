@@ -277,6 +277,9 @@ function _resetStatusBar() {
 }
 /** Maps raw backend agent output → the TypeScript AgentResult shape FindingsPanel expects. */
 function _adaptAgentResult(raw, agent) {
+    if (!raw) {
+        return { agentName: agent, stage: agent, passed: false, findings: [], summary: `${agent} returned no data.` };
+    }
     const rawFindings = raw['findings'] ?? [];
     const findings = rawFindings.map(f => ({
         type: String(f['type'] ?? f['category'] ?? 'issue'),
@@ -988,6 +991,42 @@ ${_commonStyles()}
                 return `<li>${icon} ${escHtml(j.name)} <span class="journey-status">${escHtml(j.status)}</span></li>`;
             }).join('')
             : '<li class="placeholder">No journey data available.</li>';
+        // ── Recommendation ─────────────────────────────────────────────────────────
+        const rec = raw['recommendation'];
+        const recActionSafe = rec?.action === 'approve' ? 'approve'
+            : rec?.action === 'hold' ? 'hold'
+                : 'review';
+        const recIcon = recActionSafe === 'approve' ? '✅'
+            : recActionSafe === 'hold' ? '🚫' : '⚠️';
+        const recHtml = rec
+            ? `<div class="rec-card rec-${recActionSafe}">
+           <div class="rec-icon">${recIcon}</div>
+           <div class="rec-body">
+             <div class="rec-label">${escHtml(rec.label)}</div>
+             ${rec.reasons.length
+                ? `<ul class="rec-reasons">${rec.reasons.map(r => `<li>${escHtml(r)}</li>`).join('')}</ul>`
+                : ''}
+           </div>
+         </div>`
+            : '';
+        // ── Failing test detail list (from skeptic findings) ─────────────────────
+        const rawFindings = (raw['findings'] ?? []);
+        const testFailures = rawFindings.filter(f => f.category === 'test-failure' || f.severity === 'high');
+        const failureListHtml = testFailures.length
+            ? `<div class="failure-list">
+           <p class="failure-list-hdr">🔴 ${testFailures.length} Failing Test${testFailures.length > 1 ? 's' : ''}</p>
+           ${testFailures.map(f => {
+                const colonIdx = f.description.indexOf(': ');
+                const name = colonIdx > -1 ? f.description.slice(0, colonIdx) : f.description;
+                const err = colonIdx > -1 ? f.description.slice(colonIdx + 2) : '';
+                return `<div class="failure-item">
+               <span class="failure-name">${escHtml(name)}</span>
+               ${err ? `<div class="failure-err">${escHtml(err)}</div>` : ''}
+               ${f.suggestion ? `<div class="failure-fix">💡 ${escHtml(f.suggestion)}</div>` : ''}
+             </div>`;
+            }).join('')}
+         </div>`
+            : '';
         // Inline traffic data so Chart.js renders immediately without a postMessage race
         const trafficJson = JSON.stringify(traffic ?? []);
         const hasTraffic = (traffic && traffic.length) ? 'true' : 'false';
@@ -1027,6 +1066,31 @@ ${_commonStyles()}
   .journey-status { font-size: 0.65rem; text-transform: uppercase; font-weight: 600;
                     color: var(--vscode-descriptionForeground); margin-left: auto; }
   #chart-wrap { position: relative; height: 220px; }
+  /* Failure list (below traffic chart) */
+  .failure-list     { margin-top: 12px; border: 1px solid var(--vscode-panel-border); padding: 10px 12px; }
+  .failure-list-hdr { font-size: 0.72rem; font-weight: 700; text-transform: uppercase;
+                      letter-spacing: 0.06em; color: #f87171; margin: 0 0 8px; }
+  .failure-item     { padding: 6px 0; border-bottom: 1px solid var(--vscode-panel-border); }
+  .failure-item:last-child { border-bottom: none; }
+  .failure-name     { font-size: 0.8rem; font-weight: 600; color: var(--vscode-foreground);
+                      font-family: var(--vscode-editor-font-family, monospace); display: block; }
+  .failure-err      { font-size: 0.75rem; color: #f87171; margin-top: 2px;
+                      font-family: var(--vscode-editor-font-family, monospace); white-space: pre-wrap; word-break: break-all; }
+  .failure-fix      { font-size: 0.72rem; color: var(--vscode-descriptionForeground);
+                      margin-top: 3px; font-style: italic; }
+  /* Recommendation banner */
+  .rec-card    { display: flex; align-items: flex-start; gap: 14px; padding: 14px 16px;
+                 margin-bottom: 20px; border-left: 4px solid; border-radius: 2px; }
+  .rec-approve { border-color: #4ade80; background: rgba(74,222,128,0.08); }
+  .rec-review  { border-color: #f97316; background: rgba(249,115,22,0.08); }
+  .rec-hold    { border-color: #ef4444; background: rgba(239,68,68,0.08); }
+  .rec-icon    { font-size: 1.6rem; line-height: 1; flex-shrink: 0; margin-top: 1px; }
+  .rec-body    { flex: 1; min-width: 0; }
+  .rec-label   { font-size: 0.88rem; font-weight: 700; margin-bottom: 6px;
+                 color: var(--vscode-foreground); }
+  .rec-reasons { margin: 0; padding-left: 16px; }
+  .rec-reasons li { font-size: 0.78rem; color: var(--vscode-foreground);
+                    margin-bottom: 3px; word-break: break-word; }
 </style>
 </head>
 <body>
@@ -1036,6 +1100,8 @@ ${_commonStyles()}
 </header>
 <main>
 
+  ${recHtml}
+
   <section>
     <p class="sec-hdr">Test Results</p>
     ${testHtml}
@@ -1043,9 +1109,15 @@ ${_commonStyles()}
 
   <section>
     <p class="sec-hdr">Traffic Replay</p>
+    <p class="sec-explain">
+      Shows pass/fail counts per test group or endpoint. Each bar is a group of related tests —
+      <span style="color:#4ade80">green = passed</span>, <span style="color:#f87171">red = failed</span>.
+      Groups are derived from your test suite's describe blocks or test name prefixes.
+    </p>
     ${hasTraffic === 'true'
             ? '<div id="chart-wrap"><canvas id="traffic-chart"></canvas></div>'
             : '<p class="placeholder">No traffic data available.</p>'}
+    ${failureListHtml}
   </section>
 
   <section>
@@ -1082,7 +1154,7 @@ ${_commonStyles()}
     vscode.postMessage({ type: 'decision', stage: 'skeptic', decision: 'approve' });
   document.getElementById('changes-btn').onclick = () => {
     document.getElementById('footer').innerHTML =
-      '<div class="changes-msg">✏️ Changes requested — make your fixes then run RunChecks again.</div>';
+      '<div class="changes-msg">✏️ Make your changes, then run RunChecks again.</div>';
     vscode.postMessage({ type: 'decision', stage: 'skeptic', decision: 'change' });
   };
 
@@ -1151,6 +1223,11 @@ ${_commonStyles()}
                     attacker: 'Attacker',
                     skeptic: 'Skeptic',
                 };
+                const subtitles = {
+                    factchecker: 'Code snippet and document quotation per finding',
+                    attacker: '',
+                    skeptic: '',
+                };
                 const orderedKeys = [
                     ...order.filter(k => byAgent.has(k)),
                     ...Array.from(byAgent.keys()).filter(k => !order.includes(k)),
@@ -1158,12 +1235,14 @@ ${_commonStyles()}
                 return orderedKeys.map(agentKey => {
                     const agentFindings = byAgent.get(agentKey);
                     const title = labels[agentKey] ?? (agentKey ? agentKey : 'Other');
-                    // Reuse the same rich card format as the individual findings pages
+                    const sub = subtitles[agentKey];
+                    // Reuse the same rich card format as the individual findings pages (claim, reality, codeSnippet, docSource)
                     const cards = agentFindings
                         .map(f => _findingCardHtml(_rawFindingToAgentFinding(f)))
                         .join('');
                     return `<section class="agent-section">
   <h3 class="agent-section-title">${escHtml(title)} findings</h3>
+  ${sub ? `<p class="agent-section-sub">${escHtml(sub)}</p>` : ''}
   ${cards}
 </section>`;
                 }).join('');
@@ -1219,6 +1298,12 @@ ${_commonStyles()}
   const vscode = acquireVsCodeApi();
   document.getElementById('close-btn').onclick = () =>
     vscode.postMessage({ type: 'close' });
+
+  document.querySelectorAll('.file-link').forEach(el => {
+    el.addEventListener('click', () => {
+      vscode.postMessage({ type: 'jumpToLine', file: el.dataset.file, line: Number(el.dataset.line) });
+    });
+  });
 </script>
 </body>
 </html>`;
@@ -1283,6 +1368,24 @@ function _commonStyles() {
   .status-pass { color: #4ade80; font-weight: 600; }
   .status-fail { color: #f97316; font-weight: 600; }
 
+  /* Structured summary sections */
+  .sum-section     { margin-bottom: 8px; }
+  .sum-section-hdr { font-size: 0.68rem; font-weight: 700; text-transform: uppercase;
+                     letter-spacing: 0.07em; padding: 3px 8px; border-radius: 2px;
+                     margin-bottom: 4px; display: inline-block; }
+  .sum-pass  { color: #4ade80; background: rgba(74,222,128,0.10); }
+  .sum-warn  { color: #f97316; background: rgba(249,115,22,0.10); }
+  .sum-doc   { color: #60a5fa; background: rgba(59,130,246,0.10); }
+  .sum-err   { color: #f87171; background: rgba(239,68,68,0.10); }
+  .sum-row   { font-size: 0.78rem; color: var(--vscode-foreground); padding: 2px 0 2px 10px;
+               border-left: 2px solid var(--vscode-panel-border); margin-bottom: 3px;
+               line-height: 1.4; }
+  .sum-tag   { font-size: 0.63rem; font-weight: 700; padding: 1px 6px; border-radius: 2px;
+               background: var(--vscode-editor-inactiveSelectionBackground);
+               color: var(--vscode-descriptionForeground); margin-right: 5px;
+               vertical-align: middle; }
+  .sum-err-row { color: #f87171; }
+
   /* Factchecker rich card */
   .fc-card .code-snippet { font-family: var(--vscode-editor-font-family, monospace);
     font-size: 0.78rem; background: var(--vscode-editor-background);
@@ -1323,6 +1426,8 @@ function _commonStyles() {
   .agent-section-title{ font-size: 0.8rem; font-weight: 600;
                         margin: 0 0 6px; color: var(--vscode-descriptionForeground);
                         text-transform: uppercase; letter-spacing: 0.06em; }
+  .agent-section-sub   { font-size: 0.72rem; color: var(--vscode-descriptionForeground);
+                        margin: -2px 0 8px; }
 </style>`;
 }
 function _findingCardHtml(f) {
@@ -1396,23 +1501,89 @@ function _factcheckerCardHtml(f) {
         : ''}
 </div>`;
 }
-/** Format a pipe-separated agent summary into a readable list. */
+/** Format a pipe-separated agent summary into categorised, readable sections. */
 function _formatSummaryHtml(raw) {
     if (!raw)
         return '';
     const parts = raw.split(' | ').map(p => p.trim()).filter(Boolean);
-    if (parts.length <= 1) {
-        return `<div class="summary-body">${escHtml(raw)}</div>`;
-    }
-    const items = parts.map(p => {
-        // Match [DocName] or [Tag] prefix
-        const m = p.match(/^\[([^\]]+)\]\s*(.*)/s);
-        if (m) {
-            return `<li><span class="summary-doc">[${escHtml(m[1])}]</span> ${escHtml(m[2].trim() || m[1])}</li>`;
+    const inlineParts = [];
+    const docGroups = new Map();
+    const errorParts = [];
+    for (const p of parts) {
+        // [docreader] errors
+        const drM = p.match(/^\[docreader\]\s*(.*)/si);
+        if (drM) {
+            errorParts.push(drM[1].trim() || p);
+            continue;
         }
-        return `<li>${escHtml(p)}</li>`;
-    }).join('');
-    return `<ul class="summary-lines">${items}</ul>`;
+        // [DocName] ... entries
+        const docM = p.match(/^\[([^\]]+)\]\s*(.*)/s);
+        if (docM) {
+            const docName = docM[1];
+            const rest = docM[2].trim();
+            if (!docGroups.has(docName))
+                docGroups.set(docName, { requirements: [], sections: [] });
+            const g = docGroups.get(docName);
+            if (/^requirements:|^all explicit requirements/i.test(rest)) {
+                g.requirements.push(rest.replace(/^requirements:\s*/i, '') || 'All requirements satisfied');
+            }
+            else {
+                g.sections.push(rest || docName);
+            }
+            continue;
+        }
+        // No prefix → inline comment check
+        inlineParts.push(p);
+    }
+    const sections = [];
+    // ── Inline comments block ─────────────────────────────────────────────────
+    if (inlineParts.length) {
+        const allPass = inlineParts.some(p => /match|no mismatch|all comment/i.test(p))
+            && !inlineParts.some(p => /mismatch|fail|error/i.test(p));
+        const cls = allPass ? 'sum-pass' : 'sum-warn';
+        const icon = allPass ? '✅' : '⚠️';
+        sections.push(`<div class="sum-section">` +
+            `<span class="sum-section-hdr ${cls}">${icon} Inline Comments</span>` +
+            inlineParts.map(p => `<div class="sum-row">${escHtml(p)}</div>`).join('') +
+            `</div>`);
+    }
+    // ── Per-document blocks ───────────────────────────────────────────────────
+    for (const [docName, g] of docGroups) {
+        const rows = [];
+        for (const r of g.requirements) {
+            const ok = /satisfied|pass|no fail/i.test(r);
+            rows.push(`<div class="sum-row">` +
+                `<span class="sum-tag">${ok ? '✅' : '⚠️'} Requirements</span>` +
+                `${escHtml(r)}</div>`);
+        }
+        for (const s of g.sections) {
+            const secM = s.match(/^\[([^\]]+)\]\s*(.*)/s);
+            if (secM) {
+                rows.push(`<div class="sum-row">` +
+                    `<span class="sum-tag">${escHtml(secM[1])}</span>` +
+                    `${escHtml(secM[2].trim())}</div>`);
+            }
+            else {
+                rows.push(`<div class="sum-row">${escHtml(s)}</div>`);
+            }
+        }
+        if (rows.length) {
+            sections.push(`<div class="sum-section">` +
+                `<span class="sum-section-hdr sum-doc">📄 ${escHtml(docName)}</span>` +
+                rows.join('') +
+                `</div>`);
+        }
+    }
+    // ── DocReader errors ──────────────────────────────────────────────────────
+    if (errorParts.length) {
+        sections.push(`<div class="sum-section">` +
+            `<span class="sum-section-hdr sum-err">⚠️ DocReader</span>` +
+            errorParts.map(e => `<div class="sum-row sum-err-row">${escHtml(e)}</div>`).join('') +
+            `</div>`);
+    }
+    return sections.length
+        ? sections.join('')
+        : `<div class="summary-body">${escHtml(raw)}</div>`;
 }
 /**
  * Convert a raw backend finding object (from prioritizedFindings) to an AgentFinding
@@ -1662,7 +1833,11 @@ function request(method, path, body) {
             res.on('data', chunk => { raw += chunk; });
             res.on('end', () => {
                 try {
-                    resolve(JSON.parse(raw || '{}'));
+                    const parsed = JSON.parse(raw || '{}');
+                    if (res.statusCode && res.statusCode >= 400) {
+                        return reject(new Error(parsed.error || `Backend error ${res.statusCode}`));
+                    }
+                    resolve(parsed);
                 }
                 catch {
                     reject(new Error('Invalid JSON from backend'));

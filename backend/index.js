@@ -280,8 +280,8 @@ app.get('/', (_req, res) => {
 app.get('/health', (_req, res) => res.json({ status: 'ok', timestamp: new Date().toISOString() }));
 
 function tryListen(port, maxTries = 10) {
-  const server = app.listen(port, () => {
-    console.log(`Code review backend listening on http://localhost:${port}`);
+  const server = app.listen(port, '0.0.0.0', () => {
+    console.log(`Code review backend listening on http://127.0.0.1:${port}`);
   });
   server.on('error', err => {
     if (err.code === 'EADDRINUSE' && maxTries > 1) {

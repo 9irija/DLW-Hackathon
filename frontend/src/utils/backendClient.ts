@@ -24,8 +24,13 @@ function request<T>(method: string, path: string, body?: unknown): Promise<T> {
         let raw = '';
         res.on('data', chunk => { raw += chunk; });
         res.on('end', () => {
-          try { resolve(JSON.parse(raw || '{}')); }
-          catch { reject(new Error('Invalid JSON from backend')); }
+          try {
+            const parsed = JSON.parse(raw || '{}');
+            if (res.statusCode && res.statusCode >= 400) {
+              return reject(new Error(parsed.error || `Backend error ${res.statusCode}`));
+            }
+            resolve(parsed);
+          } catch { reject(new Error('Invalid JSON from backend')); }
         });
       }
     );

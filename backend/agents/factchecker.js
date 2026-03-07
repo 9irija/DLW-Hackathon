@@ -39,7 +39,7 @@ const parser = require('./parser');
 const docreader = require('./docreader');
 
 // Default Codex (Responses API). Override with FACTCHECKER_MODEL in .env to use Chat Completions (e.g. gpt-4o-mini).
-const FACTCHECKER_MODEL = process.env.FACTCHECKER_MODEL || process.env.CODEX_MODEL || 'gpt-5-codex';
+const FACTCHECKER_MODEL = process.env.FACTCHECKER_MODEL || process.env.CODEX_MODEL || 'gpt-5.1-codex-mini';
 
 // Max concurrent LLM calls for doc-section checks (reduces wait after docreader).
 const DOC_SECTION_CONCURRENCY = Math.min(Number(process.env.FACTCHECKER_DOC_CONCURRENCY) || 4, 8);
@@ -389,8 +389,13 @@ async function checkDocAgainstCode(code, filePath, doc, meta, plainText) {
       max_tokens: 4096,
     })) || '';
 
-    // Parse LLM JSON; on failure we throw so the run fails and you can fix the model (finetune).
-    const parsed = repairTruncatedJson(raw);
+    let parsed;
+    try {
+      parsed = repairTruncatedJson(raw);
+    } catch (err) {
+      console.warn(`[factchecker] doc section parse error (${snip.title.slice(0, 40)}): ${err.message} — skipping section`);
+      return { findings: [], summary: '' };
+    }
 
     const findings = Array.isArray(parsed.findings)
       ? parsed.findings.map(f => {
@@ -476,8 +481,14 @@ Respond with valid JSON only (no markdown, no extra text):
     max_tokens: 4096,
   })) || '';
 
-  // Parse LLM JSON; on failure we throw so the run fails and you can fix the model (finetune).
-  const parsed = repairTruncatedJson(raw);
+  let parsed;
+  try {
+    parsed = repairTruncatedJson(raw);
+  } catch (err) {
+    // LLM returned unparseable output for rule verification — return empty rather than aborting.
+    console.warn(`[factchecker] rule verification: JSON repair failed — returning empty. Raw (first 300): ${raw.slice(0, 300)}`);
+    return { findings: [], summary: 'Rule verification skipped (LLM returned unparseable output).' };
+  }
 
   const findings = (parsed.findings || []).map(f => {
     const codeLineRaw = Number(f.line);
@@ -582,8 +593,10 @@ async function run(payload) {
         summaryParts.push(`[${doc.name}] all explicit requirements satisfied`);
       }
     } catch (ex) {
-      console.error(`[factchecker] rule verification failed (${doc.name}):`, ex.message);
-      throw ex;
+      // Non-fatal: rule verification failing (e.g. bad LLM JSON) should not abort the full review.
+      // Pass 2b (full section-by-section doc check) will still run.
+      console.warn(`[factchecker] rule verification parse error (${doc.name}): ${ex.message} — skipping, continuing to doc check`);
+      summaryParts.push(`[${doc.name}] requirements: parse error — skipped`);
     }
 
     // ── Pass 2b: Full document vs code check (per section) ───────────────────

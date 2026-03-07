@@ -4,7 +4,13 @@
       "Bash(node -e \"require\\(''dotenv''\\).config\\(\\); console.log\\(''KEY:'', process.env.OPENAI_API_KEY ? ''SET \\('' + process.env.OPENAI_API_KEY.slice\\(0,7\\) + ''...\\)'' : ''MISSING''\\)\")",
       "Bash(node -e \"require\\(''./core/openai''\\); console.log\\(''openai: OK''\\)\")",
       "Bash(timeout 5 node index.js)",
-      "Bash(npm run compile)"
+      "Bash(npm run compile)",
+      "Bash(node -e \"const openai = require\\(''./core/openai''\\); console.log\\(typeof openai.responses, typeof openai.chat\\);\")",
+      "Bash(node -e \"const pkg = require\\(''./node_modules/openai/package.json''\\); console.log\\(pkg.version\\);\")",
+      "Bash(timeout 30 node -e \":*)",
+      "Bash(timeout 20 node -e \":*)",
+      "Bash(timeout 60 node -e \":*)",
+      "Bash(netstat -ano)"
     ]
   }
 }

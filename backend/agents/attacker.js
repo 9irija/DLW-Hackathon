@@ -34,7 +34,7 @@ const { runSnippet } = require('../shadow/runner');
 const { trimCodeForPrompt } = require('../core/parser');
 
 // Default Codex (Responses API). Override with ATTACKER_MODEL / ATTACKER_POC_MODEL in .env for Chat Completions.
-const ATTACKER_MODEL     = process.env.ATTACKER_MODEL     || process.env.CODEX_MODEL || 'gpt-5-codex';
+const ATTACKER_MODEL     = process.env.ATTACKER_MODEL     || process.env.CODEX_MODEL || 'gpt-5.1-codex-mini';
 const ATTACKER_POC_MODEL = process.env.ATTACKER_POC_MODEL || process.env.CODEX_MODEL || 'gpt-5.1-codex-mini';
 
 // ─── Prompts ─────────────────────────────────────────────────────────────────

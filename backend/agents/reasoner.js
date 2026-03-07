@@ -22,7 +22,7 @@ const { complete } = require('../core/llm');
 const { trimCodeForPrompt } = require('../core/parser');
 
 // model choices mirror the old builder config
-const REASONER_MODEL = process.env.CODEX_MODEL || process.env.REASONER_MODEL || 'gpt-5-codex';
+const REASONER_MODEL = process.env.REASONER_MODEL || process.env.CODEX_MODEL || 'gpt-5.1-codex-mini';
 
 const REASONER_SYSTEM_PROMPT = `You are the Reasoner Agent in a multi-agent AI code review system embedded in VS Code.
 

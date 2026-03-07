@@ -314,7 +314,10 @@ function _resetStatusBar(): void {
 }
 
 /** Maps raw backend agent output → the TypeScript AgentResult shape FindingsPanel expects. */
-function _adaptAgentResult(raw: Record<string, unknown>, agent: string): AgentResult {
+function _adaptAgentResult(raw: Record<string, unknown> | undefined, agent: string): AgentResult {
+  if (!raw) {
+    return { agentName: agent, stage: agent as AgentResult['stage'], passed: false, findings: [], summary: `${agent} returned no data.` };
+  }
   const rawFindings = (raw['findings'] as Record<string, unknown>[] | undefined) ?? [];
   const findings: AgentFinding[] = rawFindings.map(f => ({
     type:        String(f['type']   ?? f['category']    ?? 'issue'),
