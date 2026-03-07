@@ -3,7 +3,7 @@
  * Runs code/tests in an isolated environment and reports real failures with evidence
  * for: failure timeline, endpoint heatmap, latency distribution, user journey failures,
  * and a system flow diagram.
- * No LLM/Codex: uses only shadow/runner, testRunner, flowParser; no model env config.
+ * Uses the LLM narrowly to interpret cryptic JS runtime errors into plain-English suggestions.
  *
  * Output shape:
  * {
@@ -13,13 +13,18 @@
  *   findings: [{ line, category, description, severity, confidence, suggestion }],
  *   summary: string,
  *   evidence?: { failureTimeline, endpointHeatmap, latencyDistribution, userJourneyFailures },
- *   flow?: { nodes, edges }
+ *   flow?: { nodes, edges },
+ *   recommendation: { action, label, context, nextSteps, reasons }
  * }
  */
 
+require('dotenv').config();
 const { runSnippet } = require('../shadow/runner');
 const { runTestSuite } = require('../shadow/testRunner');
 const { buildFlowFromCode } = require('../shadow/flowParser');
+const { complete } = require('../core/llm');
+
+const SKEPTIC_MODEL = process.env.SKEPTIC_MODEL || process.env.CODEX_MODEL || 'gpt-5.1-codex-mini';
 
 /**
  * @param {object} payload
@@ -64,13 +69,17 @@ async function run(payload) {
     const runResult = await runSnippet(code, language);
     evidence = buildEvidenceFromSnippet(runResult, filePath);
     if (runResult.executed && (runResult.exitCode !== 0 || runResult.stderr)) {
+      const errorText = runResult.stderr || `Exit code ${runResult.exitCode}`;
+      const suggestion = runResult.timedOut
+        ? 'The snippet timed out. Check for infinite loops, blocking synchronous calls, or unbounded recursion.'
+        : await interpretError(code, filePath, errorText);
       findings.push({
         line: undefined,
         category: 'runtime',
-        description: runResult.stderr || `Exit code ${runResult.exitCode}`,
+        description: errorText,
         severity: runResult.timedOut ? 'high' : 'medium',
         confidence: 85,
-        suggestion: 'Fix runtime errors or timeouts before deploying.',
+        suggestion,
       });
     }
   }
@@ -102,6 +111,36 @@ async function run(payload) {
 }
 
 /**
+ * Use an LLM to convert a raw JS runtime error into a plain-English one-sentence
+ * explanation of what went wrong and how to fix it.
+ * Falls back to a generic message on any error.
+ *
+ * @param {string} code      - The executed source code
+ * @param {string} filePath  - File name (for context only)
+ * @param {string} error     - Raw stderr / error output from the child process
+ * @returns {Promise<string>}
+ */
+async function interpretError(code, filePath, error) {
+  try {
+    const truncatedCode = code.length > 1500 ? code.slice(0, 1500) + '\n// ... (truncated)' : code;
+    const truncatedError = error.length > 600 ? error.slice(0, 600) + ' ...' : error;
+    const suggestion = await complete({
+      model: SKEPTIC_MODEL,
+      system:
+        'You are a concise code debugging assistant. Given a JavaScript snippet and its runtime error, ' +
+        'reply with a single plain-English sentence explaining the root cause and what the developer ' +
+        'should change to fix it. Do not use markdown, backticks, or bullet points.',
+      user:
+        `File: ${filePath}\n\nCode:\n${truncatedCode}\n\nRuntime error:\n${truncatedError}`,
+      max_tokens: 120,
+    });
+    return suggestion || 'Fix the runtime error shown above before deploying.';
+  } catch {
+    return 'Fix the runtime error shown above before deploying.';
+  }
+}
+
+/**
  * Synthesise an actionable recommendation from findings and execution evidence.
  *
  * Returns { action: 'approve'|'review'|'hold', label: string, reasons: string[] }
@@ -118,8 +157,21 @@ function buildRecommendation(findings, evidence) {
   // Blocking: any high or critical finding
   const blocking = findings.filter((f) => f.severity === 'high' || f.severity === 'critical');
   if (blocking.length > 0) {
-    blocking.forEach((f) => reasons.push(f.description.slice(0, 140)));
-    return { action: 'hold', label: 'Hold — Fix failures before deploying', reasons };
+    blocking.forEach((f) => {
+      reasons.push(f.description.slice(0, 140));
+      if (f.suggestion) reasons.push(`Fix: ${f.suggestion}`);
+    });
+    return {
+      action: 'hold',
+      label: 'Hold — Fix failures before deploying',
+      context: `Shadow execution found ${blocking.length} blocking failure(s). These must be resolved before this code is safe to ship — the tests are actively failing right now.`,
+      nextSteps: [
+        'Look at the failing tests listed below and fix the root cause in your code.',
+        'Re-run RunChecks after fixing to confirm the failures are gone.',
+        'If a test expectation is wrong (not the code), update the test.',
+      ],
+      reasons,
+    };
   }
 
   // Latency regression: p99 increased > 50% compared to baseline
@@ -142,14 +194,38 @@ function buildRecommendation(findings, evidence) {
 
   // Cautionary: medium findings
   const cautionary = findings.filter((f) => f.severity === 'medium');
-  cautionary.forEach((f) => reasons.push(f.description.slice(0, 140)));
+  cautionary.forEach((f) => {
+    reasons.push(f.description.slice(0, 140));
+    if (f.suggestion) reasons.push(`Fix: ${f.suggestion}`);
+  });
 
   if (cautionary.length > 0 || hasLatencyRegression) {
-    return { action: 'review', label: 'Review — Proceed with caution', reasons };
+    const what = cautionary.length > 0 && hasLatencyRegression
+      ? 'runtime warnings and a latency regression'
+      : hasLatencyRegression ? 'a latency regression' : `${cautionary.length} warning(s)`;
+    return {
+      action: 'review',
+      label: 'Review — Proceed with caution',
+      context: `Shadow execution completed but found ${what}. Nothing is broken right now, but these issues could cause problems under load or in edge cases.`,
+      nextSteps: [
+        'Read each warning below and decide if it is acceptable for your use case.',
+        hasLatencyRegression ? 'Investigate the latency increase — check for added loops, sync I/O, or blocking calls.' : null,
+        'If the warnings are acceptable, approve and continue. Otherwise make changes first.',
+      ].filter(Boolean),
+      reasons,
+    };
   }
 
-  reasons.push('No test failures, runtime errors, or latency regressions detected.');
-  return { action: 'approve', label: 'Safe to proceed', reasons };
+  return {
+    action: 'approve',
+    label: 'Safe to proceed',
+    context: 'Shadow execution ran your code and found no test failures, runtime errors, or latency regressions. The code behaved as expected.',
+    nextSteps: [
+      'Approve this stage and continue to the final verdict.',
+      'Consider adding more tests to cover edge cases if test coverage is low.',
+    ],
+    reasons: [],
+  };
 }
 
 /**
@@ -208,6 +284,11 @@ function buildEvidenceFromTestSuite(suiteResult) {
  * Build chart-ready evidence from single snippet run.
  */
 function buildEvidenceFromSnippet(runResult, filePath) {
+  // If the snippet couldn't be executed (e.g. non-JS language), return empty evidence
+  // so the chart doesn't show a misleading failure.
+  if (!runResult.executed) {
+    return { failureTimeline: [], endpointHeatmap: [], latencyDistribution: { before: [], after: [], unit: 'ms' } };
+  }
   const failed = runResult.exitCode !== 0 || runResult.timedOut;
   const failureTimeline = [
     {

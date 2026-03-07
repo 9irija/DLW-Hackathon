@@ -87,6 +87,7 @@ export class AgentStatusPanel implements vscode.WebviewViewProvider {
   .pill-idle    { background: rgba(128,128,128,0.15); color: var(--vscode-descriptionForeground); }
   .pill-running { background: rgba(0,122,204,0.2);   color: #4fc3f7; }
   .pill-passed  { background: rgba(34,197,94,0.15);  color: #4ade80; }
+  .pill-warned  { background: rgba(234,179,8,0.15);  color: #eab308; }
   .pill-failed  { background: rgba(239,68,68,0.15);  color: #f87171; }
 
   .gate { display: flex; align-items: center; gap: 5px; margin: 6px 0 6px 28px;

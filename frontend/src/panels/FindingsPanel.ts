@@ -272,7 +272,7 @@ ${_commonStyles()}
 
     // ── Recommendation ─────────────────────────────────────────────────────────
     const rec = raw['recommendation'] as
-      { action: string; label: string; reasons: string[] } | undefined;
+      { action: string; label: string; context?: string; nextSteps?: string[]; reasons: string[] } | undefined;
 
     const recActionSafe = rec?.action === 'approve' ? 'approve'
                         : rec?.action === 'hold'    ? 'hold'
@@ -286,12 +286,21 @@ ${_commonStyles()}
            <div class="rec-icon">${recIcon}</div>
            <div class="rec-body">
              <div class="rec-label">${escHtml(rec.label)}</div>
-             ${rec.reasons.length
-               ? `<ul class="rec-reasons">${rec.reasons.map(r => `<li>${escHtml(r)}</li>`).join('')}</ul>`
+             ${rec.context ? `<p class="rec-context">${escHtml(rec.context)}</p>` : ''}
+             ${(rec.nextSteps ?? []).length
+               ? `<div class="rec-steps-hdr">What to do:</div>
+                  <ol class="rec-steps">${rec.nextSteps!.map(s => `<li>${escHtml(s)}</li>`).join('')}</ol>`
+               : ''}
+             ${(rec.reasons ?? []).length
+               ? `<div class="rec-why-hdr">Why:</div>
+                  <ul class="rec-reasons">${rec.reasons.map(r => `<li>${escHtml(r)}</li>`).join('')}</ul>`
                : ''}
            </div>
          </div>`
-      : '';
+      : `<div class="rec-card rec-review">
+           <div class="rec-icon">⚠️</div>
+           <div class="rec-body"><div class="rec-label">No recommendation data available.</div></div>
+         </div>`;
 
     // ── Failing test detail list (from skeptic findings) ─────────────────────
     const rawFindings = (raw['findings'] ?? []) as {
@@ -378,8 +387,16 @@ ${_commonStyles()}
   .rec-body    { flex: 1; min-width: 0; }
   .rec-label   { font-size: 0.88rem; font-weight: 700; margin-bottom: 6px;
                  color: var(--vscode-foreground); }
+  .rec-context  { font-size: 0.78rem; color: var(--vscode-foreground);
+                  margin: 4px 0 8px; line-height: 1.5; }
+  .rec-steps-hdr, .rec-why-hdr { font-size: 0.65rem; font-weight: 700; text-transform: uppercase;
+                  letter-spacing: 0.07em; color: var(--vscode-descriptionForeground);
+                  margin: 8px 0 3px; }
+  .rec-steps   { margin: 0 0 6px; padding-left: 18px; }
+  .rec-steps li { font-size: 0.78rem; color: var(--vscode-foreground);
+                  margin-bottom: 4px; line-height: 1.4; }
   .rec-reasons { margin: 0; padding-left: 16px; }
-  .rec-reasons li { font-size: 0.78rem; color: var(--vscode-foreground);
+  .rec-reasons li { font-size: 0.75rem; color: var(--vscode-descriptionForeground);
                     margin-bottom: 3px; word-break: break-word; }
 </style>
 </head>
@@ -400,9 +417,9 @@ ${_commonStyles()}
   <section>
     <p class="sec-hdr">Traffic Replay</p>
     <p class="sec-explain">
-      Shows pass/fail counts per test group or endpoint. Each bar is a group of related tests —
+      Measures how many tests passed or failed when your code was executed in a shadow environment.
+      Each bar is a test group (derived from describe blocks or name prefixes) —
       <span style="color:#4ade80">green = passed</span>, <span style="color:#f87171">red = failed</span>.
-      Groups are derived from your test suite's describe blocks or test name prefixes.
     </p>
     ${hasTraffic === 'true'
       ? '<div id="chart-wrap"><canvas id="traffic-chart"></canvas></div>'
@@ -775,10 +792,7 @@ function _factcheckerCardHtml(f: AgentFinding): string {
   // ── Doc reference chip (external doc findings) ────────────────────────────
   const docParts: string[] = [];
   if (f.docSource)  docParts.push(escHtml(f.docSource));
-  if (f.docSection && f.docSection !== 'unknown' && f.docSection !== 'requirements') {
-    docParts.push(`§ ${escHtml(f.docSection)}`);
-  }
-  if (f.docPage != null) docParts.push(`page ${f.docPage}`);
+  if (f.docPage != null) docParts.push(`p.${f.docPage}`);
   const docRefHtml = docParts.length
     ? `<span class="doc-ref">from ${docParts.join(' · ')}</span>`
     : '';

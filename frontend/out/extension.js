@@ -175,10 +175,13 @@ async function _runAgent(agent) {
     try {
         let nextResult;
         await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: `RunChecks: Running ${agent}…`, cancellable: false }, async () => { nextResult = await client.runNextAgent(currentSessionId, agent); });
-        const passed = nextResult.agentResult?.['status'] === 'pass';
-        _agentStates[agent] = passed ? 'passed' : 'failed';
+        const agentStatus = nextResult.agentResult?.['status'];
+        const passed = agentStatus === 'pass';
+        _agentStates[agent] = agentStatus === 'pass' ? 'passed' : agentStatus === 'warn' ? 'warned' : 'failed';
         if (agent === 'factchecker') {
-            _agentStates['docreader'] = passed ? 'passed' : 'failed';
+            const fcSummary = String(nextResult.agentResult?.['summary'] ?? '');
+            const docreaderRan = fcSummary.includes('[docreader]');
+            _agentStates['docreader'] = docreaderRan ? (fcSummary.includes('[docreader] Failed') ? 'failed' : 'passed') : 'idle';
         }
         _pushStatus(agent, true);
         const adapted = _adaptAgentResult(nextResult.agentResult, agent);
@@ -202,8 +205,9 @@ async function _runSkeptic() {
     try {
         let nextResult;
         await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: 'RunChecks: Running Skeptic…', cancellable: false }, async () => { nextResult = await client.runNextAgent(currentSessionId, 'skeptic'); });
-        const passed = nextResult.agentResult?.['status'] === 'pass';
-        _agentStates['skeptic'] = passed ? 'passed' : 'failed';
+        const agentStatus = nextResult.agentResult?.['status'];
+        const passed = agentStatus === 'pass';
+        _agentStates['skeptic'] = agentStatus === 'pass' ? 'passed' : agentStatus === 'warn' ? 'warned' : 'failed';
         _pushStatus('skeptic', true);
         // Show skeptic results in the same FindingsPanel tab (no new tab)
         FindingsPanel_1.FindingsPanel.showSkeptic(_context.extensionUri, nextResult.agentResult);
@@ -395,6 +399,7 @@ class AgentStatusPanel {
   .pill-idle    { background: rgba(128,128,128,0.15); color: var(--vscode-descriptionForeground); }
   .pill-running { background: rgba(0,122,204,0.2);   color: #4fc3f7; }
   .pill-passed  { background: rgba(34,197,94,0.15);  color: #4ade80; }
+  .pill-warned  { background: rgba(234,179,8,0.15);  color: #eab308; }
   .pill-failed  { background: rgba(239,68,68,0.15);  color: #f87171; }
 
   .gate { display: flex; align-items: center; gap: 5px; margin: 6px 0 6px 28px;
@@ -1003,12 +1008,21 @@ ${_commonStyles()}
            <div class="rec-icon">${recIcon}</div>
            <div class="rec-body">
              <div class="rec-label">${escHtml(rec.label)}</div>
-             ${rec.reasons.length
-                ? `<ul class="rec-reasons">${rec.reasons.map(r => `<li>${escHtml(r)}</li>`).join('')}</ul>`
+             ${rec.context ? `<p class="rec-context">${escHtml(rec.context)}</p>` : ''}
+             ${(rec.nextSteps ?? []).length
+                ? `<div class="rec-steps-hdr">What to do:</div>
+                  <ol class="rec-steps">${rec.nextSteps.map(s => `<li>${escHtml(s)}</li>`).join('')}</ol>`
+                : ''}
+             ${(rec.reasons ?? []).length
+                ? `<div class="rec-why-hdr">Why:</div>
+                  <ul class="rec-reasons">${rec.reasons.map(r => `<li>${escHtml(r)}</li>`).join('')}</ul>`
                 : ''}
            </div>
          </div>`
-            : '';
+            : `<div class="rec-card rec-review">
+           <div class="rec-icon">⚠️</div>
+           <div class="rec-body"><div class="rec-label">No recommendation data available.</div></div>
+         </div>`;
         // ── Failing test detail list (from skeptic findings) ─────────────────────
         const rawFindings = (raw['findings'] ?? []);
         const testFailures = rawFindings.filter(f => f.category === 'test-failure' || f.severity === 'high');
@@ -1088,8 +1102,16 @@ ${_commonStyles()}
   .rec-body    { flex: 1; min-width: 0; }
   .rec-label   { font-size: 0.88rem; font-weight: 700; margin-bottom: 6px;
                  color: var(--vscode-foreground); }
+  .rec-context  { font-size: 0.78rem; color: var(--vscode-foreground);
+                  margin: 4px 0 8px; line-height: 1.5; }
+  .rec-steps-hdr, .rec-why-hdr { font-size: 0.65rem; font-weight: 700; text-transform: uppercase;
+                  letter-spacing: 0.07em; color: var(--vscode-descriptionForeground);
+                  margin: 8px 0 3px; }
+  .rec-steps   { margin: 0 0 6px; padding-left: 18px; }
+  .rec-steps li { font-size: 0.78rem; color: var(--vscode-foreground);
+                  margin-bottom: 4px; line-height: 1.4; }
   .rec-reasons { margin: 0; padding-left: 16px; }
-  .rec-reasons li { font-size: 0.78rem; color: var(--vscode-foreground);
+  .rec-reasons li { font-size: 0.75rem; color: var(--vscode-descriptionForeground);
                     margin-bottom: 3px; word-break: break-word; }
 </style>
 </head>
@@ -1110,9 +1132,9 @@ ${_commonStyles()}
   <section>
     <p class="sec-hdr">Traffic Replay</p>
     <p class="sec-explain">
-      Shows pass/fail counts per test group or endpoint. Each bar is a group of related tests —
+      Measures how many tests passed or failed when your code was executed in a shadow environment.
+      Each bar is a test group (derived from describe blocks or name prefixes) —
       <span style="color:#4ade80">green = passed</span>, <span style="color:#f87171">red = failed</span>.
-      Groups are derived from your test suite's describe blocks or test name prefixes.
     </p>
     ${hasTraffic === 'true'
             ? '<div id="chart-wrap"><canvas id="traffic-chart"></canvas></div>'
@@ -1467,11 +1489,8 @@ function _factcheckerCardHtml(f) {
     const docParts = [];
     if (f.docSource)
         docParts.push(escHtml(f.docSource));
-    if (f.docSection && f.docSection !== 'unknown' && f.docSection !== 'requirements') {
-        docParts.push(`§ ${escHtml(f.docSection)}`);
-    }
     if (f.docPage != null)
-        docParts.push(`page ${f.docPage}`);
+        docParts.push(`p.${f.docPage}`);
     const docRefHtml = docParts.length
         ? `<span class="doc-ref">from ${docParts.join(' · ')}</span>`
         : '';

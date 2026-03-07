@@ -10,7 +10,11 @@
       "Bash(timeout 30 node -e \":*)",
       "Bash(timeout 20 node -e \":*)",
       "Bash(timeout 60 node -e \":*)",
-      "Bash(netstat -ano)"
+      "Bash(netstat -ano)",
+      "Bash(grep -n \"passed ? ''passed'' : ''failed''\" c:/Users/mgiri/RunChecks/frontend/src/extension.ts)",
+      "Bash(sed -i \"s/const passed = nextResult\\\\.agentResult?\\\\.\\\\[''status''\\\\] === ''pass'';/const agentStatus = nextResult.agentResult?.[''status''];\\\\n    const passed = agentStatus === ''pass'';/\" c:/Users/mgiri/RunChecks/frontend/src/extension.ts)",
+      "Bash(sed -i \"193s/_agentStates\\\\[agent\\\\] = passed ? ''passed'' : ''failed'';/_agentStates[agent] = agentStatus === ''pass'' ? ''passed'' : agentStatus === ''warn'' ? ''warned'' : ''failed'';/\" c:/Users/mgiri/RunChecks/frontend/src/extension.ts)",
+      "Bash(grep -n \"agentStatus\\\\|passed ? ''passed''\\\\|''warned''\\\\|''failed''\" c:/Users/mgiri/RunChecks/frontend/src/extension.ts)"
     ]
   }
 }

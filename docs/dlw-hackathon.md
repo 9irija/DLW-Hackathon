@@ -92,8 +92,10 @@ A VS Code extension backed by a stateful Express API that runs six AI agents acr
   - `hold` — any high/critical finding (blocks deployment, reasons listed)
   - `review` — medium findings OR p99 latency regression > 50% vs baseline
   - `approve` — all clear, safe to proceed
+- Each recommendation includes a `context` paragraph (what the result means) and a `nextSteps` list (what to do next), rendered as a rich card — not just a label
+- For JS runtime failures, `interpretError()` calls the LLM to convert the raw stderr into a plain-English one-sentence explanation of the root cause and fix, replacing the generic "Fix runtime errors" fallback
 - Frontend renders a **colour-coded recommendation banner** (green / orange / red) at the top of the Skeptic panel before test results
-- Output: `{ tests, evidence: { failureTimeline, endpointHeatmap, latencyDistribution, userJourneyFailures }, flow, recommendation: { action, label, reasons } }`
+- Output: `{ tests, evidence: { failureTimeline, endpointHeatmap, latencyDistribution, userJourneyFailures }, flow, recommendation: { action, label, context, nextSteps, reasons } }`
 
 ---
 
@@ -150,7 +152,18 @@ VS Code's file-picker API, `FileReader`, JSON serialisation, and direct Buffer o
 
 ### 9. Skeptic as a decision engine, not just a reporter
 
-The initial Skeptic design simply reported pass/fail counts and latency numbers. We added `buildRecommendation()` so the agent synthesises everything into one of three explicit actions with labelled reasons. Developers no longer have to interpret raw data — they get a clear signal ("Hold — fix test X before deploying") with the evidence attached.
+The initial Skeptic design simply reported pass/fail counts and latency numbers. We added `buildRecommendation()` so the agent synthesises everything into one of three explicit actions. Each recommendation now ships with three layers:
+
+- **`label`** — a one-line verdict (e.g. "Hold — Fix failures before deploying")
+- **`context`** — a prose sentence explaining what the execution result actually means (e.g. "Shadow execution found 2 blocking failures — the tests are actively failing right now")
+- **`nextSteps`** — a numbered list of concrete actions the developer should take next
+- **`reasons`** — the raw evidence bullets (failing test names, latency deltas) dimmed below the action card
+
+The frontend renders these as a structured card — not just a coloured badge — so developers immediately understand both what happened and what to do about it.
+
+### 10. LLM error interpretation for runtime failures
+
+Shadow execution captures raw stderr from the child process. Stack traces like `TypeError: Cannot read properties of undefined (reading 'map') at Object.<anonymous> (/tmp/snippet.js:12:9)` are accurate but require reading the code to understand. We added `interpretError()` — a narrow LLM call (≤120 tokens) that receives the code and the raw error and returns a single plain-English sentence: what failed and exactly what to change. This call is skipped entirely for timeouts (the cause is always a loop/blocking call, no LLM needed) and for non-JS languages (shadow runner doesn't execute them). Rule-based logic handles all other recommendation logic; the LLM is used only where raw output is genuinely opaque to the developer.
 
 ---
 

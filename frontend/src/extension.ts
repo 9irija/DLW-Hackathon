@@ -15,7 +15,7 @@ let currentFilePath:  string | undefined;
 let _context:         vscode.ExtensionContext;
 
 // Per-agent live state fed to the sidebar panel
-const _agentStates: Record<string, 'idle'|'running'|'passed'|'failed'> = {
+const _agentStates: Record<string, 'idle'|'running'|'passed'|'warned'|'failed'> = {
   orchestrator: 'idle', parser: 'idle', docreader: 'idle', reasoner: 'idle',
   factchecker:  'idle', attacker: 'idle', skeptic: 'idle',
 };
@@ -189,10 +189,13 @@ async function _runAgent(agent: string): Promise<void> {
       async () => { nextResult = await client.runNextAgent(currentSessionId!, agent); }
     );
 
-    const passed = nextResult.agentResult?.['status'] === 'pass';
-    _agentStates[agent] = passed ? 'passed' : 'failed';
+    const agentStatus = nextResult.agentResult?.['status'];
+    const passed = agentStatus === 'pass';
+    _agentStates[agent] = agentStatus === 'pass' ? 'passed' : agentStatus === 'warn' ? 'warned' : 'failed';
     if (agent === 'factchecker') {
-      _agentStates['docreader'] = passed ? 'passed' : 'failed';
+      const fcSummary = String(nextResult.agentResult?.['summary'] ?? '');
+      const docreaderRan = fcSummary.includes('[docreader]');
+      _agentStates['docreader'] = docreaderRan ? (fcSummary.includes('[docreader] Failed') ? 'failed' : 'passed') : 'idle';
     }
     _pushStatus(agent, true);
 
@@ -222,8 +225,9 @@ async function _runSkeptic(): Promise<void> {
       async () => { nextResult = await client.runNextAgent(currentSessionId!, 'skeptic'); }
     );
 
-    const passed = nextResult.agentResult?.['status'] === 'pass';
-    _agentStates['skeptic'] = passed ? 'passed' : 'failed';
+    const agentStatus = nextResult.agentResult?.['status'];
+    const passed = agentStatus === 'pass';
+    _agentStates['skeptic'] = agentStatus === 'pass' ? 'passed' : agentStatus === 'warn' ? 'warned' : 'failed';
     _pushStatus('skeptic', true);
 
     // Show skeptic results in the same FindingsPanel tab (no new tab)

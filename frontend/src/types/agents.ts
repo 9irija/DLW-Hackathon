@@ -27,7 +27,7 @@ export interface SessionStatus {
   awaitingDecision: boolean;
   agents: {
     name:   string;
-    status: 'idle' | 'running' | 'passed' | 'failed';
+    status: 'idle' | 'running' | 'passed' | 'warned' | 'failed';
   }[];
 }
 
